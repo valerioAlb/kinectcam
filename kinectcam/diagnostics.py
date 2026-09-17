@@ -71,18 +71,72 @@ def check_runtime() -> Check:
     )
 
 
-def check_usb3() -> Check:
+# PCI vendor IDs of USB host controllers, and whether Microsoft lists them as
+# supported for the Kinect v2. The sensor is unusually picky here: the official
+# requirement is an Intel or Renesas controller, and the documented symptom on
+# anything else is a degraded frame rate or streams that stop working.
+# Vendor IDs are used rather than device names because names are localised.
+USB_CONTROLLER_VENDORS = {
+    "8086": ("Intel", True),
+    "1912": ("Renesas", True),
+    "1033": ("NEC/Renesas", True),
+    "1022": ("AMD", False),
+    "1b21": ("ASMedia", False),
+    "1106": ("VIA", False),
+    "1b73": ("Fresco Logic", False),
+}
+
+SUPPORTED_VENDOR_NAMES = "Intel or Renesas"
+
+
+def _usb_host_controllers():
+    """(vendor id, name) for every USB host controller present."""
     output = _run_powershell(
-        "(Get-PnpDevice -Class USB -PresentOnly -ErrorAction SilentlyContinue | "
-        "Where-Object { $_.FriendlyName -match 'xHCI|USB 3' } | "
-        "Select-Object -ExpandProperty FriendlyName) -join '; '"
+        "(Get-PnpDevice -PresentOnly -ErrorAction SilentlyContinue | "
+        "Where-Object { $_.Class -eq 'USB' -and $_.InstanceId -like 'PCI\\*' } | "
+        "ForEach-Object { \"$($_.InstanceId)|$($_.FriendlyName)\" }) -join ';;'"
     )
-    found = bool(output) and not output.startswith("(")
+    if not output or output.startswith("("):
+        return []
+
+    controllers = []
+    for entry in output.split(";;"):
+        instance_id, _, name = entry.partition("|")
+        match = re.search(r"VEN_([0-9A-Fa-f]{4})", instance_id)
+        controllers.append((match.group(1).lower() if match else "", name.strip()))
+    return controllers
+
+
+def check_usb3() -> Check:
+    """Which USB controllers are present, and whether any is one the Kinect likes."""
+    controllers = _usb_host_controllers()
+    if not controllers:
+        return Check(
+            "USB 3.0 controller", False, "no USB host controller detected",
+            "The Kinect v2 requires USB 3.0; it will not start on USB 2.0.",
+        )
+
+    seen = {}
+    for vendor_id, name in controllers:
+        vendor, supported = USB_CONTROLLER_VENDORS.get(vendor_id, ("unknown", False))
+        seen.setdefault(vendor, supported)
+
+    supported_vendors = sorted(v for v, ok in seen.items() if ok)
+    unsupported = sorted(v for v, ok in seen.items() if not ok)
+
+    detail = ", ".join(
+        f"{vendor}{'' if seen[vendor] else ' (unsupported)'}" for vendor in sorted(seen)
+    )
+    if supported_vendors:
+        return Check("USB 3.0 controller", True, detail)
+
     return Check(
-        "USB 3.0 controller",
-        found,
-        output if found else "no xHCI controller detected",
-        "" if found else "The Kinect v2 requires USB 3.0; it will not start on USB 2.0.",
+        "USB 3.0 controller", False, detail,
+        f"Microsoft only supports {SUPPORTED_VENDOR_NAMES} USB 3.0 controllers for "
+        f"the Kinect v2. On {', '.join(unsupported)} the documented symptom is "
+        "exactly this: a degraded frame rate, or streams that keep stopping and "
+        "restarting. If the sensor keeps freezing, a PCIe USB 3.0 card with a "
+        "Renesas uPD720202 chipset is the usual fix.",
     )
 
 
@@ -128,49 +182,75 @@ def on_ac_power():
     return bool(status.ACLineStatus)
 
 
-def usb_suspend_on_battery():
-    """True when Windows may suspend USB ports once running on battery."""
+def usb_selective_suspend():
+    """(on mains, on battery): True, False or None when unreadable.
+
+    Both settings matter. A desktop has no battery profile at all, so reading
+    only the battery one reports "unreadable" and tells the user nothing,
+    while the setting that actually applies to them is the mains one.
+    """
     output = _run_powershell(
         "$g = (powercfg /getactivescheme) -replace '.*GUID: ([0-9a-f-]+).*','$1'; "
         "(powercfg /query $g 2a737441-1930-4402-8d77-b2bebba308a3 "
         "48e6b7a6-50f5-4782-a5d4-53bb8f07e226) -join \"`n\""
     )
-    match = re.search(r"Current DC Power Setting Index:\s*(0x[0-9a-fA-F]+)", output)
-    if not match:
-        return None
-    return int(match.group(1), 16) != 0
+
+    def read(label):
+        match = re.search(rf"Current {label} Power Setting Index:\s*(0x[0-9a-fA-F]+)", output)
+        return None if not match else int(match.group(1), 16) != 0
+
+    return read("AC"), read("DC")
 
 
 def check_power() -> Check:
-    """On battery Windows powers USB ports down, and the Kinect cannot cope.
+    """Windows powers USB ports down, and the Kinect cannot cope with that.
 
     The sensor streams isochronously at full bandwidth and draws a lot of
     current: exactly the kind of peripheral that selective suspend pushes
     into a cyclic stall, with freezes of a few seconds that keep repeating.
     """
     ac = on_ac_power()
-    suspend = usb_suspend_on_battery()
+    suspend_ac, suspend_dc = usb_selective_suspend()
 
-    if ac is None:
-        return Check("Power source", True, "desktop, or state not detectable")
+    # The setting that applies right now is the one worth judging.
+    on_mains = ac is not False
+    active = suspend_ac if on_mains else suspend_dc
+    source = "desktop or on mains" if ac is None else ("on mains" if ac else "ON BATTERY")
 
-    source = "on mains" if ac else "ON BATTERY"
-    if suspend is None:
-        detail = f"{source}, USB setting unreadable"
-    elif suspend:
-        detail = f"{source}, USB selective suspend on battery ENABLED"
+    if active is None:
+        detail = f"{source}, USB selective suspend setting unreadable"
+    elif active:
+        detail = f"{source}, USB selective suspend ENABLED"
     else:
-        detail = f"{source}, USB selective suspend on battery disabled"
+        detail = f"{source}, USB selective suspend disabled"
 
-    risky = (not ac) and suspend is not False
-    return Check(
-        "Power source", not risky, detail,
-        "" if not risky else (
-            "Plug the laptop into mains power before using the Kinect. On "
-            "battery Windows suspends the USB ports and the sensor freezes "
-            "intermittently. Alternatively, disable USB selective suspend on "
-            "battery as well."
-        ),
+    hints = []
+    if active:
+        hints.append(
+            "Disable USB selective suspend: Windows can power the port down "
+            "under the sensor and the stream freezes and restarts in cycles."
+        )
+    if ac is False and suspend_dc is not False:
+        hints.append(
+            "Plug the laptop into mains power: on battery Windows is far more "
+            "aggressive about suspending USB ports."
+        )
+
+    return Check("Power source", not hints, detail, " ".join(hints))
+
+
+def has_supported_usb_controller():
+    """True when at least one Intel or Renesas controller is present.
+
+    None when the controllers cannot be enumerated, so callers can stay quiet
+    instead of guessing.
+    """
+    controllers = _usb_host_controllers()
+    if not controllers:
+        return None
+    return any(
+        USB_CONTROLLER_VENDORS.get(vendor_id, ("", False))[1]
+        for vendor_id, _name in controllers
     )
 
 

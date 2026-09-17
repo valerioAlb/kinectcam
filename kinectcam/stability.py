@@ -311,6 +311,7 @@ class MonitorReport:
     events: list = field(default_factory=list)
     started: bool = False
     on_battery: bool = False
+    unsupported_controller: bool = False
 
     @property
     def fps(self) -> float:
@@ -356,6 +357,7 @@ def monitor(duration: float = MONITOR_DURATION, stall_seconds: float = STALL_SEC
 
     report = MonitorReport()
     report.on_battery = diagnostics.on_ac_power() is False
+    report.unsupported_controller = diagnostics.has_supported_usb_controller() is False
 
     sensor = KinectSensor()
     try:
@@ -435,9 +437,10 @@ def interpret_monitor(report: MonitorReport) -> list:
     if report.is_periodic:
         lines.append(
             "VERDICT: the freezes return at REGULAR intervals. A failing cable "
-            "or a loose contact is not punctual like a clock: this regularity "
-            "is the signature of power management suspending the USB port and "
-            "waking it back up."
+            "or a loose contact is not punctual like a clock, so this is not a "
+            "bad connection. Something is cycling: either the USB host "
+            "controller renegotiating the link, or power management suspending "
+            "the port and waking it back up."
         )
     else:
         lines.append(
@@ -447,13 +450,23 @@ def interpret_monitor(report: MonitorReport) -> list:
             "seated and, if you have a spare one, try that."
         )
 
+    if report.unsupported_controller:
+        lines.append("")
+        lines.append(
+            "MOST LIKELY CAUSE: this machine has no Intel or Renesas USB 3.0 "
+            "controller, and those are the only ones Microsoft supports for the "
+            "Kinect v2. On other chipsets the documented symptom is exactly "
+            "this. Changing port will not help if every port hangs off the same "
+            "unsupported controller; a PCIe USB 3.0 card with a Renesas "
+            "uPD720202 chipset is the usual fix and costs very little."
+        )
+
     if report.on_battery:
         lines.append("")
         lines.append(
-            "IMPORTANT: this machine is running ON BATTERY. Windows suspends "
-            "USB ports in that state and the Kinect cannot cope. Plug the "
-            "laptop into mains power and repeat the test: it is the first thing "
-            "to rule out, and it costs nothing."
+            "ALSO: this machine is running ON BATTERY. Windows suspends USB "
+            "ports in that state and the Kinect cannot cope. Plug into mains "
+            "power and repeat the test: it costs nothing to rule out."
         )
     return lines
 

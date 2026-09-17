@@ -576,6 +576,25 @@ class FreezeMonitorTests(unittest.TestCase):
         )
         self.assertIn("ON BATTERY", verdict)
 
+    def test_an_unsupported_controller_is_named_as_the_likely_cause(self):
+        # Regular freezes on a desktop plugged into mains are far more often
+        # the host controller than power management, and changing port does
+        # not help when every port is on the same chipset.
+        report = self._report([10, 20, 30, 40, 50])
+        report.unsupported_controller = True
+        verdict = " ".join(stability.interpret_monitor(report))
+        self.assertIn("MOST LIKELY CAUSE", verdict)
+        self.assertIn("Renesas", verdict)
+
+    def test_a_supported_controller_is_not_blamed(self):
+        verdict = " ".join(stability.interpret_monitor(self._report([10, 20, 30, 40, 50])))
+        self.assertNotIn("MOST LIKELY CAUSE", verdict)
+
+    def test_regular_freezes_no_longer_blame_a_bad_connection(self):
+        verdict = " ".join(stability.interpret_monitor(self._report([10, 20, 30, 40, 50])))
+        self.assertIn("REGULAR", verdict)
+        self.assertIn("not a bad connection", verdict)
+
     def test_no_freezes_suggests_repeating_under_load(self):
         verdict = " ".join(stability.interpret_monitor(self._report([])))
         self.assertIn("No freezes", verdict)
@@ -591,12 +610,51 @@ class PowerCheckTests(unittest.TestCase):
     def test_reports_a_boolean_or_none(self):
         self.assertIn(diagnostics.on_ac_power(), (True, False, None))
 
+    def test_both_power_profiles_are_read(self):
+        # A desktop has no battery profile, so reading only the battery setting
+        # reports "unreadable" and tells the user nothing about the one that
+        # actually applies to them.
+        ac, dc = diagnostics.usb_selective_suspend()
+        for value in (ac, dc):
+            self.assertIn(value, (True, False, None))
+
     def test_check_runs_and_explains_itself(self):
         check = diagnostics.check_power()
         self.assertEqual(check.name, "Power source")
         self.assertTrue(check.detail)
         if not check.ok:
-            self.assertIn("mains", check.hint)
+            self.assertTrue(check.hint)
+
+
+class UsbControllerTests(unittest.TestCase):
+    """The Kinect v2 only works properly on Intel or Renesas controllers."""
+
+    def test_vendor_table_marks_only_intel_and_renesas_as_supported(self):
+        supported = {
+            vendor for vendor, ok in diagnostics.USB_CONTROLLER_VENDORS.values() if ok
+        }
+        self.assertEqual(supported, {"Intel", "Renesas", "NEC/Renesas"})
+
+    def test_the_known_problem_chipsets_are_listed(self):
+        # These are the ones users actually hit, and the reason the check
+        # exists at all: on them the sensor streams in fits and starts.
+        names = {vendor for vendor, _ in diagnostics.USB_CONTROLLER_VENDORS.values()}
+        for chipset in ("AMD", "ASMedia", "VIA", "Fresco Logic"):
+            self.assertIn(chipset, names)
+
+    def test_check_names_the_vendors_it_found(self):
+        check = diagnostics.check_usb3()
+        self.assertEqual(check.name, "USB 3.0 controller")
+        self.assertTrue(check.detail)
+        if not check.ok:
+            # A failure must say what to do, not merely that something is wrong.
+            self.assertIn("Renesas", check.hint)
+
+    def test_support_query_agrees_with_the_check(self):
+        supported = diagnostics.has_supported_usb_controller()
+        self.assertIn(supported, (True, False, None))
+        if supported is not None:
+            self.assertEqual(diagnostics.check_usb3().ok, supported)
 
 
 class RuntimePresentTests(unittest.TestCase):

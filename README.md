@@ -43,11 +43,26 @@ and as compatible clones.
 |---|---|
 | Adapter | Kinect Adapter for Windows (or an equivalent clone) |
 | Port | A **direct** USB 3.0 port on the machine, not a hub |
+| Controller | An **Intel or Renesas** USB 3.0 host controller — see below |
 | Power | The adapter's power supply must be connected |
 | OS | 64-bit Windows 10 or 11 |
 
 The Kinect v2 consumes most of a USB 3.0 controller's bandwidth: if you have
 other fast devices on the same controller, move them.
+
+### The USB controller matters more than you would expect
+
+This is the requirement that catches people out. Microsoft only supports the
+Kinect v2 on **Intel or Renesas** USB 3.0 host controllers. On AMD, ASMedia,
+VIA or Fresco Logic chipsets the documented symptom is a degraded frame rate or
+streams that keep stopping and restarting — and it is not subtle: on an
+unsupported controller the sensor has been observed streaming for seven seconds
+and freezing for seven, over and over.
+
+Changing port does not help when every port hangs off the same chipset. The
+usual fix is a PCIe USB 3.0 card with a **Renesas uPD720202** chipset, which
+costs very little. KinectCam's diagnostics identify your controller's vendor
+and say so outright.
 
 ---
 
@@ -176,9 +191,14 @@ A different symptom from dropped frames, and a different cause: the image
 freezes for a few seconds, then resumes, and it keeps happening. Work through
 this in order.
 
-**1. Plug the laptop into mains power.** This is the most likely cause and it
-costs nothing to rule out. On battery Windows enables **USB selective
-suspend**, and the Kinect v2 is precisely the peripheral that cannot cope:
+**1. Check your USB controller.** Run **Diagnostics** and read the "USB 3.0
+controller" line. If it says `(unsupported)`, that is very likely your answer:
+see [The USB controller matters](#the-usb-controller-matters-more-than-you-would-expect).
+No amount of cable swapping fixes an unsupported chipset.
+
+**2. Plug the laptop into mains power.** Cheap to rule out, and the most common
+cause on laptops. On battery Windows enables **USB selective suspend**, and the
+Kinect v2 is precisely the peripheral that cannot cope:
 it streams isochronously at full bandwidth and draws a lot of current. The port
 gets suspended, the sensor stalls, the port wakes, the sensor restarts.
 KinectCam's diagnostics check for and flag this condition.
@@ -189,18 +209,18 @@ To disable it on battery too, from an elevated PowerShell:
 powercfg /setdcvalueindex SCHEME_CURRENT 2a737441-1930-4402-8d77-b2bebba308a3 48e6b7a6-50f5-4782-a5d4-53bb8f07e226 0; powercfg /setactive SCHEME_CURRENT
 ```
 
-**2. Press "Hunt for freezes".** It watches the stream for ninety seconds and
+**3. Press "Hunt for freezes".** It watches the stream for ninety seconds and
 logs every episode: when it happens and how long it lasts. What matters is the
 **regularity**:
 
 | What the numbers show | Where it comes from |
 |---|---|
-| Freezes at regular intervals, e.g. every 10 s | **Power management.** A hardware fault is not punctual like a clock. |
+| Freezes at regular intervals, e.g. every 10 s | **Something cycling**: the host controller renegotiating the link, or power management suspending the port. A hardware fault is not punctual like a clock. |
 | Scattered, irregular freezes | **Marginal contact or power**: USB port, cable, adapter power supply. |
 | No freezes while idle | Try again with the virtual camera running: the higher load may be what triggers it. |
 
-**3. Change USB 3.0 port**, choosing a direct one on a different controller, and
-check that the adapter's power supply is firmly seated.
+**4. Change USB 3.0 port**, choosing a direct one on a different controller,
+and check that the adapter's power supply is firmly seated.
 
 A note on "it works fine on the Xbox": useful information, but read it
 carefully. It clears **the sensor**, not the adapter, because the adapter is
@@ -276,6 +296,7 @@ degrades together.
 | "opened but no data arriving" | Shared or hubbed USB 3.0 port: try a different direct port |
 | "Virtual camera unavailable" | Open OBS Studio once and close it: the first launch registers the driver |
 | "Kinect20.dll not found" | Runtime not installed: rerun `install.ps1` |
+| "USB 3.0 controller: AMD (unsupported)" | Microsoft only supports Intel and Renesas controllers. A Renesas uPD720202 PCIe card is the usual fix. |
 | "No frames from the sensor for several seconds" | The sensor stopped streaming and the image is frozen on the last frame. Almost always the USB 3.0 cable or the adapter's power supply. Stop and restart the virtual camera. |
 | The camera freezes and restarts every few seconds | See [If the camera freezes and restarts periodically](#if-the-camera-freezes-and-restarts-periodically) |
 | The runtime will not install | Clear `C:\ProgramData\Package Cache` and retry with the sensor disconnected |
