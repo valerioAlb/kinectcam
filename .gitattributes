@@ -1,0 +1,9 @@
+# Normalise line endings so the repo stays consistent across platforms.
+* text=auto
+
+# PowerShell is happier with CRLF on Windows.
+*.ps1 text eol=crlf
+
+*.py  text eol=lf
+*.md  text eol=lf
+*.txt text eol=lf
