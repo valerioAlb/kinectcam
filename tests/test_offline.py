@@ -561,14 +561,15 @@ class FreezeMonitorTests(unittest.TestCase):
         # With only two episodes any pair would look regular.
         self.assertFalse(self._report([10, 20]).is_periodic)
 
-    def test_periodic_verdict_blames_power_management(self):
-        verdict = " ".join(stability.interpret_monitor(self._report([10, 20, 30, 40, 50])))
-        self.assertIn("REGULAR", verdict)
-        self.assertIn("power management", verdict)
+    def test_a_present_device_losing_frames_points_at_the_link(self):
+        # Regular freezes with the device still present and its clock running
+        # mean the frames were produced and lost on the way here.
+        report = self._report([10, 20, 30, 40, 50], length=2.0)
+        for event in report.events:
+            event.clock_advanced_ms = 2000.0
+        verdict = " ".join(stability.interpret_monitor(report))
+        self.assertIn("points at the link", verdict)
 
-    def test_irregular_verdict_blames_contact_or_supply(self):
-        verdict = " ".join(stability.interpret_monitor(self._report([3, 27, 31, 68, 71])))
-        self.assertIn("IRREGULAR", verdict)
 
     def test_battery_is_always_called_out(self):
         verdict = " ".join(
@@ -576,15 +577,44 @@ class FreezeMonitorTests(unittest.TestCase):
         )
         self.assertIn("ON BATTERY", verdict)
 
+    def _offline_report(self, starts=(10, 20, 30, 40)):
+        report = self._report(list(starts))
+        for event in report.events:
+            event.sensor_offline = True
+        return report
+
     def test_a_device_that_drops_off_is_blamed_on_power(self):
         # The runtime losing sight of the sensor means it left the bus. No
         # amount of software can cause that, so the verdict must say hardware.
-        report = self._report([10, 20, 30, 40])
-        for event in report.events:
-            event.sensor_offline = True
+        verdict = " ".join(stability.interpret_monitor(self._offline_report()))
+        self.assertIn("LEFT THE BUS", verdict)
+        self.assertIn("12 V", verdict)
+
+    def test_the_wrong_power_brick_is_called_out_by_its_rating(self):
+        # The Kinect v1 supply looks nearly identical and gives under half the
+        # current, which is a mistake worth naming rather than hinting at.
+        verdict = " ".join(stability.interpret_monitor(self._offline_report()))
+        self.assertIn("1.08 A", verdict)
+        self.assertIn("v1", verdict)
+
+    def test_dropping_off_suppresses_the_other_explanations(self):
+        # Two contradictory causes on screen at once would be worse than one.
+        report = self._offline_report()
+        report.unsupported_controller = True
+        report.on_battery = True
         verdict = " ".join(stability.interpret_monitor(report))
-        self.assertIn("left the bus", verdict)
-        self.assertIn("power supply", verdict)
+        self.assertIn("LEFT THE BUS", verdict)
+        self.assertNotIn("LIKELY CAUSE", verdict)
+        self.assertNotIn("ON BATTERY", verdict)
+
+    def test_an_occasional_dropout_does_not_override_the_rest(self):
+        # One freeze out of four is not the same finding as all of them.
+        report = self._report([10, 20, 30, 40], length=2.0)
+        report.events[0].sensor_offline = True
+        for event in report.events:
+            event.clock_advanced_ms = 2000.0
+        verdict = " ".join(stability.interpret_monitor(report))
+        self.assertNotIn("LEFT THE BUS", verdict)
 
     def test_a_present_device_with_a_stopped_clock_points_at_the_sensor(self):
         report = self._report([10, 20, 30, 40], length=2.0)
@@ -621,20 +651,24 @@ class FreezeMonitorTests(unittest.TestCase):
         # Regular freezes on a desktop plugged into mains are far more often
         # the host controller than power management, and changing port does
         # not help when every port is on the same chipset.
-        report = self._report([10, 20, 30, 40, 50])
+        report = self._report([10, 20, 30, 40, 50], length=2.0)
+        for event in report.events:
+            event.clock_advanced_ms = 2000.0
         report.unsupported_controller = True
         verdict = " ".join(stability.interpret_monitor(report))
-        self.assertIn("MOST LIKELY CAUSE", verdict)
+        self.assertIn("LIKELY CAUSE", verdict)
         self.assertIn("Renesas", verdict)
 
     def test_a_supported_controller_is_not_blamed(self):
         verdict = " ".join(stability.interpret_monitor(self._report([10, 20, 30, 40, 50])))
-        self.assertNotIn("MOST LIKELY CAUSE", verdict)
+        self.assertNotIn("LIKELY CAUSE", verdict)
 
-    def test_regular_freezes_no_longer_blame_a_bad_connection(self):
-        verdict = " ".join(stability.interpret_monitor(self._report([10, 20, 30, 40, 50])))
-        self.assertIn("REGULAR", verdict)
-        self.assertIn("not a bad connection", verdict)
+    def test_irregular_freezes_with_the_device_present_blame_the_contact(self):
+        report = self._report([3, 27, 31, 68, 71], length=2.0)
+        for event in report.events:
+            event.clock_advanced_ms = 2000.0
+        verdict = " ".join(stability.interpret_monitor(report))
+        self.assertIn("IRREGULAR", verdict)
 
     def test_no_freezes_suggests_repeating_under_load(self):
         verdict = " ".join(stability.interpret_monitor(self._report([])))

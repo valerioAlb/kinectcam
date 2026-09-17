@@ -485,71 +485,71 @@ def interpret_monitor(report: MonitorReport) -> list:
     running = report.clock_kept_running_count
     total = len(report.events)
     lines.append(
-        f"During the freezes the device dropped off {offline}/{total} times, "
-        f"and its own clock kept running {running}/{total} times."
+        f"The runtime lost sight of the device in {offline} of {total} freezes. "
+        f"Its frame clock ran through the gap in {running} of {total}."
     )
     lines.append("")
 
-    # These two signals separate faults that look identical from the outside.
-    if offline:
+    # The availability flag is the decisive one. The clock is corroboration:
+    # it confirms the gap was real elapsed time and the runtime session
+    # survived, rather than our own reader having stalled.
+    if offline > total / 2:
         lines.append(
-            "WHAT THIS MEANS: the runtime lost sight of the sensor entirely "
-            "while it was frozen, so the device left the bus and came back. "
-            "That is hardware, not software: power or connection. The adapter's "
-            "power supply is the first suspect, especially a third-party one, "
-            "because the Kinect v2 needs a steady 12 V at nearly 3 A and browns "
-            "out into a reset loop when it cannot get it."
+            "VERDICT: the device LEFT THE BUS and came back, every time. No "
+            "software can make a device disappear from USB, so this is "
+            "hardware: power or connection. The regularity fits a brown-out "
+            "reset loop, where the sensor draws more than it is being given, "
+            "resets, comes back and does it again."
+        )
+        lines.append("")
+        lines.append(
+            "CHECK THE POWER SUPPLY FIRST. The Kinect v2 needs 12 V at 2.67 A "
+            "(32 W). Read the label on the adapter's brick: if it says 12 V "
+            "1.08 A, that is the Xbox 360 Kinect v1 supply, which looks almost "
+            "identical and delivers under half the current. Third-party "
+            "adapters are also often underrated. If the sensor works on an "
+            "Xbox but not on a PC, remember the adapter is the one part the "
+            "Xbox does not use."
+        )
+    elif not report.is_periodic:
+        lines.append(
+            "VERDICT: the freezes are IRREGULAR and the device stayed present. "
+            "Typical of an unreliable contact: try another direct USB 3.0 port "
+            "and check that the adapter's power supply is firmly seated."
         )
     elif total and running == 0:
         lines.append(
-            "WHAT THIS MEANS: the sensor stayed present but its own clock stood "
-            "still, so the device stopped producing frames rather than losing "
-            "them in transit. That points at the sensor or the runtime, not at "
-            "the cable."
-        )
-    elif total:
-        lines.append(
-            "WHAT THIS MEANS: the sensor stayed present and its clock ran "
-            "straight through the gap, so it kept working and the frames simply "
-            "never reached this machine. That points at the link: bandwidth, "
-            "the controller, or power management on the port."
-        )
-    lines.append("")
-
-    if report.is_periodic:
-        lines.append(
-            "VERDICT: the freezes return at REGULAR intervals. A failing cable "
-            "or a loose contact is not punctual like a clock, so this is not a "
-            "bad connection. Something is cycling: either the USB host "
-            "controller renegotiating the link, or power management suspending "
-            "the port and waking it back up."
+            "VERDICT: the device stayed present but its frame clock stood "
+            "still, so it stopped producing frames rather than losing them in "
+            "transit. That points at the sensor or the runtime, not the cable."
         )
     else:
         lines.append(
-            "VERDICT: the freezes are IRREGULAR. Typical of an unreliable "
-            "contact or of a power supply at its limit: try another direct "
-            "USB 3.0 port, check that the adapter's power supply is firmly "
-            "seated and, if you have a spare one, try that."
+            "VERDICT: the device stayed present and its clock ran straight "
+            "through the gap, so the frames never reached this machine. That "
+            "points at the link: bandwidth, the host controller, or power "
+            "management on the port."
         )
 
-    if report.unsupported_controller:
-        lines.append("")
-        lines.append(
-            "MOST LIKELY CAUSE: this machine has no Intel or Renesas USB 3.0 "
-            "controller, and those are the only ones Microsoft supports for the "
-            "Kinect v2. On other chipsets the documented symptom is exactly "
-            "this. Changing port will not help if every port hangs off the same "
-            "unsupported controller; a PCIe USB 3.0 card with a Renesas "
-            "uPD720202 chipset is the usual fix and costs very little."
-        )
-
-    if report.on_battery:
-        lines.append("")
-        lines.append(
-            "ALSO: this machine is running ON BATTERY. Windows suspends USB "
-            "ports in that state and the Kinect cannot cope. Plug into mains "
-            "power and repeat the test: it costs nothing to rule out."
-        )
+    # These only matter when the device did not simply drop off the bus,
+    # which would otherwise leave two contradictory explanations on screen.
+    if offline <= total / 2:
+        if report.unsupported_controller:
+            lines.append("")
+            lines.append(
+                "LIKELY CAUSE: this machine has no Intel or Renesas USB 3.0 "
+                "controller, and those are the only ones Microsoft supports for "
+                "the Kinect v2. Changing port will not help if every port hangs "
+                "off the same chipset; a PCIe card with a Renesas uPD720202 is "
+                "the usual fix."
+            )
+        if report.on_battery:
+            lines.append("")
+            lines.append(
+                "ALSO: this machine is running ON BATTERY. Windows suspends USB "
+                "ports in that state. Plug into mains power and repeat the "
+                "test: it costs nothing to rule out."
+            )
     return lines
 
 
