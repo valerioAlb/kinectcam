@@ -107,9 +107,12 @@ def _usb_host_controllers():
     return controllers
 
 
-def check_usb3() -> Check:
-    """Which USB controllers are present, and whether any is one the Kinect likes."""
-    controllers = _usb_host_controllers()
+def classify_usb_controllers(controllers) -> Check:
+    """Turns a list of (vendor id, name) into a verdict.
+
+    Kept separate from querying the system so the decision can be tested
+    against every chipset, including ones no development machine has.
+    """
     if not controllers:
         return Check(
             "USB 3.0 controller", False, "no USB host controller detected",
@@ -138,6 +141,11 @@ def check_usb3() -> Check:
         "restarting. If the sensor keeps freezing, a PCIe USB 3.0 card with a "
         "Renesas uPD720202 chipset is the usual fix.",
     )
+
+
+def check_usb3() -> Check:
+    """Which USB controllers are present, and whether any is one the Kinect likes."""
+    return classify_usb_controllers(_usb_host_controllers())
 
 
 def check_device_present() -> Check:
@@ -224,13 +232,16 @@ def check_power() -> Check:
     else:
         detail = f"{source}, USB selective suspend disabled"
 
+    # Only a setting read as enabled is worth a warning. An unreadable one is
+    # not evidence of a problem, and failing the check on it would send people
+    # chasing a fault that may not exist.
     hints = []
-    if active:
+    if active is True:
         hints.append(
             "Disable USB selective suspend: Windows can power the port down "
             "under the sensor and the stream freezes and restarts in cycles."
         )
-    if ac is False and suspend_dc is not False:
+    if ac is False and suspend_dc is True:
         hints.append(
             "Plug the laptop into mains power: on battery Windows is far more "
             "aggressive about suspending USB ports."

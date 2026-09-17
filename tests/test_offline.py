@@ -642,13 +642,63 @@ class UsbControllerTests(unittest.TestCase):
         for chipset in ("AMD", "ASMedia", "VIA", "Fresco Logic"):
             self.assertIn(chipset, names)
 
-    def test_check_names_the_vendors_it_found(self):
+    # Vendor ids as they appear in a PCI instance id.
+    INTEL = "8086"
+    RENESAS = "1912"
+    AMD = "1022"
+    ASMEDIA = "1b21"
+
+    def test_an_intel_controller_passes(self):
+        check = diagnostics.classify_usb_controllers([(self.INTEL, "Intel xHCI")])
+        self.assertTrue(check.ok)
+        self.assertIn("Intel", check.detail)
+
+    def test_an_amd_only_machine_fails_with_the_fix(self):
+        # The case that prompted this check: an all-AMD desktop streaming in
+        # seven-second bursts. The hint has to name the remedy, not just the
+        # problem, because changing port cannot help here.
+        check = diagnostics.classify_usb_controllers([
+            (self.AMD, "AMD USB 3.10 eXtensible Host Controller"),
+            (self.AMD, "AMD USB 3.20 eXtensible Host Controller"),
+        ])
+        self.assertFalse(check.ok)
+        self.assertIn("AMD", check.detail)
+        self.assertIn("unsupported", check.detail)
+        self.assertIn("Renesas", check.hint)
+
+    def test_a_supported_controller_alongside_an_unsupported_one_passes(self):
+        # Plenty of machines have both; one usable controller is enough.
+        check = diagnostics.classify_usb_controllers([
+            (self.AMD, "AMD xHCI"), (self.RENESAS, "Renesas xHCI"),
+        ])
+        self.assertTrue(check.ok)
+
+    def test_other_problem_chipsets_are_rejected_too(self):
+        for vendor_id, name in ((self.ASMEDIA, "ASMedia"), ("1106", "VIA")):
+            with self.subTest(name):
+                self.assertFalse(
+                    diagnostics.classify_usb_controllers([(vendor_id, name)]).ok
+                )
+
+    def test_an_unknown_vendor_is_treated_as_unsupported(self):
+        check = diagnostics.classify_usb_controllers([("ffff", "Mystery controller")])
+        self.assertFalse(check.ok)
+        self.assertIn("Renesas", check.hint)
+
+    def test_no_controllers_reports_the_usb3_requirement(self):
+        # A virtual machine enumerates no PCI USB controllers at all. That is
+        # a different failure from an unsupported chipset, and suggesting a
+        # Renesas card there would be beside the point.
+        check = diagnostics.classify_usb_controllers([])
+        self.assertFalse(check.ok)
+        self.assertIn("USB 3.0", check.hint)
+
+    def test_the_live_check_returns_a_usable_verdict(self):
         check = diagnostics.check_usb3()
         self.assertEqual(check.name, "USB 3.0 controller")
         self.assertTrue(check.detail)
         if not check.ok:
-            # A failure must say what to do, not merely that something is wrong.
-            self.assertIn("Renesas", check.hint)
+            self.assertTrue(check.hint)
 
     def test_support_query_agrees_with_the_check(self):
         supported = diagnostics.has_supported_usb_controller()
