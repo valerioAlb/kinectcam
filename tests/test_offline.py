@@ -576,6 +576,47 @@ class FreezeMonitorTests(unittest.TestCase):
         )
         self.assertIn("ON BATTERY", verdict)
 
+    def test_a_device_that_drops_off_is_blamed_on_power(self):
+        # The runtime losing sight of the sensor means it left the bus. No
+        # amount of software can cause that, so the verdict must say hardware.
+        report = self._report([10, 20, 30, 40])
+        for event in report.events:
+            event.sensor_offline = True
+        verdict = " ".join(stability.interpret_monitor(report))
+        self.assertIn("left the bus", verdict)
+        self.assertIn("power supply", verdict)
+
+    def test_a_present_device_with_a_stopped_clock_points_at_the_sensor(self):
+        report = self._report([10, 20, 30, 40], length=2.0)
+        for event in report.events:
+            event.sensor_offline = False
+            event.clock_advanced_ms = 0.0
+        verdict = " ".join(stability.interpret_monitor(report))
+        self.assertIn("stopped producing frames", verdict)
+
+    def test_a_clock_that_ran_through_points_at_the_link(self):
+        report = self._report([10, 20, 30, 40], length=2.0)
+        for event in report.events:
+            event.sensor_offline = False
+            event.clock_advanced_ms = 2000.0
+        verdict = " ".join(stability.interpret_monitor(report))
+        self.assertIn("never reached this machine", verdict)
+
+    def test_clock_comparison_is_against_the_freeze_length(self):
+        # A clock that moved a few milliseconds across a six second gap did
+        # not keep running, even though it did move.
+        stalled = stability.FreezeEvent(at=0, duration=6.0, clock_advanced_ms=30.0)
+        ran = stability.FreezeEvent(at=0, duration=6.0, clock_advanced_ms=5900.0)
+        self.assertFalse(stalled.clock_kept_running())
+        self.assertTrue(ran.clock_kept_running())
+
+    def test_counts_are_reported_per_event(self):
+        report = self._report([10, 20, 30, 40], length=2.0)
+        report.events[0].sensor_offline = True
+        report.events[1].clock_advanced_ms = 2000.0
+        self.assertEqual(report.dropped_off_count, 1)
+        self.assertEqual(report.clock_kept_running_count, 1)
+
     def test_an_unsupported_controller_is_named_as_the_likely_cause(self):
         # Regular freezes on a desktop plugged into mains are far more often
         # the host controller than power management, and changing port does

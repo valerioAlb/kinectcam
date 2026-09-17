@@ -297,11 +297,27 @@ MONITOR_DURATION = 90.0
 # of their typical value.
 REGULARITY_LIMIT = 0.35
 
+# How often to ask the runtime whether the sensor is still there while frozen.
+AVAILABILITY_PROBE_SECONDS = 0.25
+
 
 @dataclass
 class FreezeEvent:
     at: float
     duration: float
+    # Did the runtime report the sensor as gone while it was frozen?
+    sensor_offline: bool = False
+    # How far the sensor's own clock moved across the gap, in milliseconds.
+    # A clock that kept running means the device stayed alive and the frames
+    # simply did not reach us; a clock that stood still means the device
+    # itself stopped producing them.
+    clock_advanced_ms: float = 0.0
+
+    def clock_kept_running(self, tolerance: float = 0.5) -> bool:
+        expected = self.duration * 1000.0
+        if expected <= 0:
+            return True
+        return self.clock_advanced_ms >= expected * tolerance
 
 
 @dataclass
@@ -330,6 +346,16 @@ class MonitorReport:
     @property
     def median_duration(self) -> float:
         return float(np.median([e.duration for e in self.events])) if self.events else 0.0
+
+    @property
+    def dropped_off_count(self) -> int:
+        """Freezes during which the runtime stopped seeing the device at all."""
+        return sum(1 for event in self.events if event.sensor_offline)
+
+    @property
+    def clock_kept_running_count(self) -> int:
+        """Freezes the sensor's own clock ran straight through."""
+        return sum(1 for event in self.events if event.clock_kept_running())
 
     @property
     def is_periodic(self) -> bool:
@@ -377,26 +403,48 @@ def monitor(duration: float = MONITOR_DURATION, stall_seconds: float = STALL_SEC
 
         start = time.perf_counter()
         last_frame_at = start
+        last_ticks = stream.relative_time
         stall_from = None
+        went_offline = False
+        next_probe = 0.0
 
         while time.perf_counter() - start < duration:
             if stream.read() is None:
                 now = time.perf_counter()
                 if stall_from is None and now - last_frame_at > stall_seconds:
                     stall_from = last_frame_at
+                    went_offline = False
+                    next_probe = now
+                # While frozen, ask the runtime whether the device is still
+                # there. A sensor that drops off the bus and comes back is a
+                # different fault from one that stays present but stops
+                # sending, and only this tells them apart.
+                if stall_from is not None and now >= next_probe:
+                    next_probe = now + AVAILABILITY_PROBE_SECONDS
+                    if not sensor.is_available:
+                        went_offline = True
                 time.sleep(0.002)
                 continue
 
             now = time.perf_counter()
             report.frames += 1
             if stall_from is not None:
-                event = FreezeEvent(at=stall_from - start, duration=now - stall_from)
+                advanced = (stream.relative_time - last_ticks) * 1000.0 / TICKS_PER_SECOND
+                event = FreezeEvent(
+                    at=stall_from - start,
+                    duration=now - stall_from,
+                    sensor_offline=went_offline,
+                    clock_advanced_ms=max(0.0, advanced),
+                )
                 report.events.append(event)
                 if on_event:
                     on_event(
-                        f"freeze at {event.at:.0f}s, lasting {event.duration:.1f}s"
+                        f"freeze at {event.at:.0f}s, lasting {event.duration:.1f}s "
+                        f"(device {'dropped off' if went_offline else 'stayed present'}, "
+                        f"sensor clock {'kept running' if event.clock_kept_running() else 'stood still'})"
                     )
                 stall_from = None
+            last_ticks = stream.relative_time
             last_frame_at = now
 
         report.duration = time.perf_counter() - start
@@ -432,6 +480,40 @@ def interpret_monitor(report: MonitorReport) -> list:
         f"Typical freeze length: {report.median_duration:.1f}s"
         + (f", roughly every {report.median_interval:.0f}s" if report.intervals else "")
     )
+
+    offline = report.dropped_off_count
+    running = report.clock_kept_running_count
+    total = len(report.events)
+    lines.append(
+        f"During the freezes the device dropped off {offline}/{total} times, "
+        f"and its own clock kept running {running}/{total} times."
+    )
+    lines.append("")
+
+    # These two signals separate faults that look identical from the outside.
+    if offline:
+        lines.append(
+            "WHAT THIS MEANS: the runtime lost sight of the sensor entirely "
+            "while it was frozen, so the device left the bus and came back. "
+            "That is hardware, not software: power or connection. The adapter's "
+            "power supply is the first suspect, especially a third-party one, "
+            "because the Kinect v2 needs a steady 12 V at nearly 3 A and browns "
+            "out into a reset loop when it cannot get it."
+        )
+    elif total and running == 0:
+        lines.append(
+            "WHAT THIS MEANS: the sensor stayed present but its own clock stood "
+            "still, so the device stopped producing frames rather than losing "
+            "them in transit. That points at the sensor or the runtime, not at "
+            "the cable."
+        )
+    elif total:
+        lines.append(
+            "WHAT THIS MEANS: the sensor stayed present and its clock ran "
+            "straight through the gap, so it kept working and the frames simply "
+            "never reached this machine. That points at the link: bandwidth, "
+            "the controller, or power management on the port."
+        )
     lines.append("")
 
     if report.is_periodic:
