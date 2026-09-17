@@ -597,6 +597,19 @@ class FreezeMonitorTests(unittest.TestCase):
         self.assertIn("1.08 A", verdict)
         self.assertIn("v1", verdict)
 
+    def test_a_correct_label_does_not_end_the_investigation(self):
+        # A genuine, correctly rated supply can still sag after a decade, so
+        # the advice has to continue past the label rather than stop there.
+        verdict = " ".join(stability.interpret_monitor(self._offline_report()))
+        self.assertIn("correct label does not clear it", verdict)
+        self.assertIn("swap", verdict)
+
+    def test_working_on_an_xbox_is_not_treated_as_exoneration(self):
+        # The console powers the sensor itself, so it never exercises the
+        # adapter or its brick.
+        verdict = " ".join(stability.interpret_monitor(self._offline_report()))
+        self.assertIn("Xbox never uses", verdict)
+
     def test_dropping_off_suppresses_the_other_explanations(self):
         # Two contradictory causes on screen at once would be worse than one.
         report = self._offline_report()

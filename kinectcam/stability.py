@@ -503,13 +503,28 @@ def interpret_monitor(report: MonitorReport) -> list:
         )
         lines.append("")
         lines.append(
-            "CHECK THE POWER SUPPLY FIRST. The Kinect v2 needs 12 V at 2.67 A "
-            "(32 W). Read the label on the adapter's brick: if it says 12 V "
-            "1.08 A, that is the Xbox 360 Kinect v1 supply, which looks almost "
-            "identical and delivers under half the current. Third-party "
-            "adapters are also often underrated. If the sensor works on an "
-            "Xbox but not on a PC, remember the adapter is the one part the "
-            "Xbox does not use."
+            "START WITH THE POWER SUPPLY. The Kinect v2 needs 12 V at 2.67 A "
+            "(32 W). Read the label on the brick: 12 V 1.08 A is the Xbox 360 "
+            "Kinect v1 supply, which looks almost identical and delivers under "
+            "half the current, and third-party adapters are often underrated."
+        )
+        lines.append("")
+        lines.append(
+            "A correct label does not clear it. These are switching supplies "
+            "from 2014 to 2017, and an aged one still prints its original "
+            "rating while sagging under load. Two checks that cost nothing: "
+            "run this test again with an ear next to the brick and the sensor, "
+            "because a supply oscillating like this often ticks audibly and "
+            "the sensor's fan rises and falls in step; and if you have a "
+            "multimeter, measure the 12 V output while the sensor is "
+            "streaming. Otherwise the answer is a swap: another adapter, or "
+            "another 12 V supply rated at 2.67 A or more."
+        )
+        lines.append("")
+        lines.append(
+            "If the sensor behaves on an Xbox, that does not clear the supply "
+            "either. An Xbox powers the sensor from the console, so the "
+            "adapter and its brick are exactly the parts the Xbox never uses."
         )
     elif not report.is_periodic:
         lines.append(
