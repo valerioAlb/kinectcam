@@ -330,11 +330,14 @@ class MonitorReport:
     unsupported_controller: bool = False
     # USB/PnP events Windows logged while watching. -1 means unread.
     windows_usb_events: int = -1
-    # The depth stream watched over the same timeline. Colour is by far the
-    # heaviest stream in bandwidth, so comparing the two separates a link
-    # that cannot carry colour from a device that stops altogether.
+    # Depth watched on its own, in a second pass with no colour stream open.
+    # Colour is several times the bandwidth of depth, so depth surviving
+    # alone separates a link that cannot carry the heavy stream from a device
+    # that stops regardless. The two passes have to be separate: reading both
+    # at once leaves colour loading the link and proves nothing about it.
     depth_frames: int = 0
     depth_events: list = field(default_factory=list)
+    depth_watched: bool = False
 
     @property
     def fps(self) -> float:
@@ -377,6 +380,48 @@ class MonitorReport:
         return spread < REGULARITY_LIMIT
 
 
+def _watch_depth_alone(duration: float, stall_seconds: float, progress=None):
+    """Second pass: depth with no colour stream open at all.
+
+    Only this answers the bandwidth question. Depth read while colour is also
+    running shares a link that colour is already saturating, so it tells us
+    nothing about whether the link can carry depth on its own.
+    """
+    sensor = KinectSensor()
+    frames_seen = 0
+    events = []
+    try:
+        sensor.open()
+        if not sensor.wait_until_available(timeout=8.0):
+            return 0, [], False
+        stream = sensor.depth_stream()
+        if progress:
+            progress("Second pass: watching depth on its own...")
+        if not _warm_up(stream, timeout=20.0):
+            return 0, [], False
+
+        start = time.perf_counter()
+        last_at = start
+        stall_from = None
+        while time.perf_counter() - start < duration:
+            if stream.read() is None:
+                now = time.perf_counter()
+                if stall_from is None and now - last_at > stall_seconds:
+                    stall_from = last_at
+                time.sleep(0.002)
+                continue
+            now = time.perf_counter()
+            frames_seen += 1
+            if stall_from is not None:
+                events.append(FreezeEvent(at=stall_from - start,
+                                          duration=now - stall_from))
+                stall_from = None
+            last_at = now
+    finally:
+        sensor.close()
+    return frames_seen, events, True
+
+
 def monitor(duration: float = MONITOR_DURATION, stall_seconds: float = STALL_SECONDS,
             progress=None, on_event=None) -> MonitorReport:
     """Watches the colour stream for a long stretch and logs every freeze.
@@ -398,7 +443,6 @@ def monitor(duration: float = MONITOR_DURATION, stall_seconds: float = STALL_SEC
         if not sensor.wait_until_available(timeout=8.0):
             raise KinectError("The sensor is not responding: nothing to observe.")
         stream = sensor.color_stream()
-        depth = sensor.depth_stream()
 
         if progress:
             progress("Waiting for the stream to start...")
@@ -406,8 +450,14 @@ def monitor(duration: float = MONITOR_DURATION, stall_seconds: float = STALL_SEC
             return report
         report.started = True
 
+        # The budget is split between the two passes so the whole run still
+        # takes about as long as before.
+        colour_duration = duration / 2
         if progress:
-            progress(f"Watching for {duration:.0f} seconds, leave everything alone...")
+            progress(
+                f"First pass: watching colour for {colour_duration:.0f} seconds, "
+                "leave everything alone..."
+            )
 
         start = time.perf_counter()
         last_frame_at = start
@@ -416,26 +466,7 @@ def monitor(duration: float = MONITOR_DURATION, stall_seconds: float = STALL_SEC
         went_offline = False
         next_probe = 0.0
 
-        depth_last_at = start
-        depth_stall_from = None
-
-        while time.perf_counter() - start < duration:
-            # Depth is watched on the same timeline, in the same loop, so the
-            # two streams can be compared instant by instant.
-            if depth.read() is not None:
-                depth_now = time.perf_counter()
-                report.depth_frames += 1
-                if depth_stall_from is not None:
-                    report.depth_events.append(FreezeEvent(
-                        at=depth_stall_from - start,
-                        duration=depth_now - depth_stall_from,
-                    ))
-                    depth_stall_from = None
-                depth_last_at = depth_now
-            elif (depth_stall_from is None
-                  and time.perf_counter() - depth_last_at > stall_seconds):
-                depth_stall_from = depth_last_at
-
+        while time.perf_counter() - start < colour_duration:
             if stream.read() is None:
                 now = time.perf_counter()
                 if stall_from is None and now - last_frame_at > stall_seconds:
@@ -477,6 +508,12 @@ def monitor(duration: float = MONITOR_DURATION, stall_seconds: float = STALL_SEC
         report.duration = time.perf_counter() - start
     finally:
         sensor.close()
+
+    # Only worth a second pass if the first one actually found something.
+    if report.events:
+        report.depth_frames, report.depth_events, report.depth_watched = (
+            _watch_depth_alone(duration / 2, stall_seconds, progress)
+        )
 
     if report.events:
         if progress:
@@ -561,10 +598,10 @@ def interpret_monitor(report: MonitorReport) -> list:
         # the same instants that kill colour, the device is fine and the link
         # cannot carry the heavy stream.
         depth_stalls = len(report.depth_events)
-        if report.depth_frames:
+        if report.depth_watched:
             lines.append(
-                f"Watched alongside colour, depth took {report.depth_frames} "
-                f"frames and stalled {depth_stalls} times."
+                f"Watched again with colour closed, depth took "
+                f"{report.depth_frames} frames and stalled {depth_stalls} times."
             )
             if depth_stalls == 0:
                 lines.append(

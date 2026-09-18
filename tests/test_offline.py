@@ -630,6 +630,7 @@ class FreezeMonitorTests(unittest.TestCase):
         # straight through the same instants proves the sensor was alive.
         report = self._offline_report()
         report.windows_usb_events = 0
+        report.depth_watched = True
         report.depth_frames = 2600
         verdict = " ".join(stability.interpret_monitor(report))
         self.assertIn("DEPTH KEPT RUNNING", verdict)
@@ -638,6 +639,7 @@ class FreezeMonitorTests(unittest.TestCase):
     def test_depth_stalling_too_points_at_the_device(self):
         report = self._offline_report()
         report.windows_usb_events = 0
+        report.depth_watched = True
         report.depth_frames = 900
         report.depth_events = [
             stability.FreezeEvent(at=at, duration=6.0) for at in (10, 20, 30, 40)
@@ -645,6 +647,16 @@ class FreezeMonitorTests(unittest.TestCase):
         verdict = " ".join(stability.interpret_monitor(report))
         self.assertIn("DEPTH STALLED TOO", verdict)
         self.assertIn("KinectMonitor", verdict)
+
+    def test_a_depth_pass_that_produced_nothing_is_still_reported(self):
+        # The gate is whether the second pass ran, not whether it got frames:
+        # depth failing to produce anything at all is itself a finding.
+        report = self._offline_report()
+        report.windows_usb_events = 0
+        report.depth_watched = True
+        report.depth_frames = 0
+        verdict = " ".join(stability.interpret_monitor(report))
+        self.assertIn("depth took 0 frames", verdict)
 
     def test_no_depth_data_means_no_comparison_is_claimed(self):
         report = self._offline_report()
