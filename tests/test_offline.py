@@ -625,6 +625,42 @@ class FreezeMonitorTests(unittest.TestCase):
         self.assertIn("re-enumerating", verdict)
         self.assertIn("electrical", verdict)
 
+    def test_depth_surviving_points_at_bandwidth(self):
+        # Colour needs several times the bandwidth of depth. Depth running
+        # straight through the same instants proves the sensor was alive.
+        report = self._offline_report()
+        report.windows_usb_events = 0
+        report.depth_frames = 2600
+        verdict = " ".join(stability.interpret_monitor(report))
+        self.assertIn("DEPTH KEPT RUNNING", verdict)
+        self.assertIn("bandwidth", verdict)
+
+    def test_depth_stalling_too_points_at_the_device(self):
+        report = self._offline_report()
+        report.windows_usb_events = 0
+        report.depth_frames = 900
+        report.depth_events = [
+            stability.FreezeEvent(at=at, duration=6.0) for at in (10, 20, 30, 40)
+        ]
+        verdict = " ".join(stability.interpret_monitor(report))
+        self.assertIn("DEPTH STALLED TOO", verdict)
+        self.assertIn("KinectMonitor", verdict)
+
+    def test_no_depth_data_means_no_comparison_is_claimed(self):
+        report = self._offline_report()
+        report.windows_usb_events = 0
+        verdict = " ".join(stability.interpret_monitor(report))
+        self.assertNotIn("DEPTH KEPT RUNNING", verdict)
+        self.assertNotIn("DEPTH STALLED TOO", verdict)
+
+    def test_silence_in_the_log_is_not_overstated(self):
+        # Windows does not log a link-level reset, so the absence of events
+        # cannot be presented as proof that nothing electrical happened.
+        report = self._offline_report()
+        report.windows_usb_events = 0
+        verdict = " ".join(stability.interpret_monitor(report))
+        self.assertIn("does not rule out a link-level reset", verdict)
+
     def test_windows_silence_moves_the_blame_off_power(self):
         # A device that truly leaves the bus makes Windows notice. If nothing
         # was logged, only the runtime lost it, and telling the user to chase
@@ -633,7 +669,7 @@ class FreezeMonitorTests(unittest.TestCase):
         report.windows_usb_events = 0
         verdict = " ".join(stability.interpret_monitor(report))
         self.assertIn("NO USB or PnP events", verdict)
-        self.assertIn("KinectMonitor", verdict)
+        self.assertIn("staying on the bus", verdict)
         self.assertNotIn("POWER IS THE FIRST THING", verdict)
 
     def test_an_unread_event_log_keeps_the_power_advice(self):

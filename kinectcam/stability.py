@@ -330,6 +330,11 @@ class MonitorReport:
     unsupported_controller: bool = False
     # USB/PnP events Windows logged while watching. -1 means unread.
     windows_usb_events: int = -1
+    # The depth stream watched over the same timeline. Colour is by far the
+    # heaviest stream in bandwidth, so comparing the two separates a link
+    # that cannot carry colour from a device that stops altogether.
+    depth_frames: int = 0
+    depth_events: list = field(default_factory=list)
 
     @property
     def fps(self) -> float:
@@ -393,6 +398,7 @@ def monitor(duration: float = MONITOR_DURATION, stall_seconds: float = STALL_SEC
         if not sensor.wait_until_available(timeout=8.0):
             raise KinectError("The sensor is not responding: nothing to observe.")
         stream = sensor.color_stream()
+        depth = sensor.depth_stream()
 
         if progress:
             progress("Waiting for the stream to start...")
@@ -410,7 +416,26 @@ def monitor(duration: float = MONITOR_DURATION, stall_seconds: float = STALL_SEC
         went_offline = False
         next_probe = 0.0
 
+        depth_last_at = start
+        depth_stall_from = None
+
         while time.perf_counter() - start < duration:
+            # Depth is watched on the same timeline, in the same loop, so the
+            # two streams can be compared instant by instant.
+            if depth.read() is not None:
+                depth_now = time.perf_counter()
+                report.depth_frames += 1
+                if depth_stall_from is not None:
+                    report.depth_events.append(FreezeEvent(
+                        at=depth_stall_from - start,
+                        duration=depth_now - depth_stall_from,
+                    ))
+                    depth_stall_from = None
+                depth_last_at = depth_now
+            elif (depth_stall_from is None
+                  and time.perf_counter() - depth_last_at > stall_seconds):
+                depth_stall_from = depth_last_at
+
             if stream.read() is None:
                 now = time.perf_counter()
                 if stall_from is None and now - last_frame_at > stall_seconds:
@@ -523,14 +548,42 @@ def interpret_monitor(report: MonitorReport) -> list:
             )
         elif logged == 0:
             lines.append(
-                "Windows logged NO USB or PnP events while watching, which "
-                "matters. A device that truly leaves the bus makes Windows "
-                "notice; here only the Kinect runtime lost it. Look at the "
-                "sensor and its service rather than at power: try restarting "
-                "the KinectMonitor service, and check that the sensor's fan "
-                "is spinning, because the Kinect shuts its emitter down when "
-                "it overheats."
+                "Windows logged NO USB or PnP events while watching. A device "
+                "that is torn down and re-detected makes Windows load its "
+                "driver again and say so, so the device is staying on the bus "
+                "and it is the streaming pipeline that keeps dropping. That "
+                "does not rule out a link-level reset, which Windows does not "
+                "log, but it does rule out the sensor disappearing outright."
             )
+        lines.append("")
+
+        # Colour is several times the bandwidth of depth. If depth survives
+        # the same instants that kill colour, the device is fine and the link
+        # cannot carry the heavy stream.
+        depth_stalls = len(report.depth_events)
+        if report.depth_frames:
+            lines.append(
+                f"Watched alongside colour, depth took {report.depth_frames} "
+                f"frames and stalled {depth_stalls} times."
+            )
+            if depth_stalls == 0:
+                lines.append(
+                    "DEPTH KEPT RUNNING THROUGH ALL OF IT. The sensor was alive "
+                    "and delivering the whole time, so neither power nor the "
+                    "device is at fault: only the colour stream is failing, and "
+                    "it is the one that needs several times the bandwidth. Look "
+                    "at the USB 3 link itself: the adapter's cable, the port, "
+                    "and anything else sharing that controller. As a workaround "
+                    "the infrared and depth modes will run normally."
+                )
+            elif depth_stalls >= max(1, len(report.events) - 1):
+                lines.append(
+                    "DEPTH STALLED TOO, at much the same rate. The whole "
+                    "pipeline is going down, not just the heavy stream, which "
+                    "points at the sensor or the Kinect service rather than at "
+                    "bandwidth. Restarting the KinectMonitor service is worth a "
+                    "try, and so is checking that the sensor's fan spins."
+                )
         lines.append("")
         if logged != 0:
             lines.append(
