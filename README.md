@@ -202,6 +202,12 @@ right-click **Microphone Array - Xbox NUI Sensor** → Properties → *Advanced*
 → untick **Enable audio enhancements**. Check it is not muted while you are
 there. KinectCam's diagnostics flag this directly.
 
+Measured on a setup that had been failing for days: with enhancements on, the
+sensor streamed for about six seconds and froze for about six, over and over,
+every thirteen seconds. With them off, the same machine held **29.9 fps with
+zero freezes**. Everything else had already been ruled out, including the
+power supply, the USB controller and the cable.
+
 **2. Check your USB controller.** Run **Diagnostics** and read the "USB 3.0
 controller" line. If it says `(unsupported)`, that is very likely your answer:
 see [The USB controller matters](#the-usb-controller-matters-more-than-you-would-expect).
