@@ -636,7 +636,8 @@ class FreezeMonitorTests(unittest.TestCase):
         self.assertIn("DEPTH KEPT RUNNING", verdict)
         self.assertIn("bandwidth", verdict)
 
-    def test_depth_stalling_too_points_at_the_device(self):
+    def _pipeline_report(self):
+        """Depth stalling too: the load-independent case."""
         report = self._offline_report()
         report.windows_usb_events = 0
         report.depth_watched = True
@@ -644,9 +645,34 @@ class FreezeMonitorTests(unittest.TestCase):
         report.depth_events = [
             stability.FreezeEvent(at=at, duration=6.0) for at in (10, 20, 30, 40)
         ]
-        verdict = " ".join(stability.interpret_monitor(report))
+        return report
+
+    def test_depth_stalling_too_rules_out_bandwidth(self):
+        verdict = " ".join(stability.interpret_monitor(self._pipeline_report()))
         self.assertIn("DEPTH STALLED TOO", verdict)
+        self.assertIn("regardless of load", verdict)
+
+    def test_cycling_while_idle_points_at_device_and_service(self):
+        # Nothing is being transferred, so nothing on the data path can be
+        # responsible. This is the pass that isolates the connection itself.
+        report = self._pipeline_report()
+        report.idle_watched = True
+        report.idle_dropouts = 3
+        verdict = " ".join(stability.interpret_monitor(report))
+        self.assertIn("NOTHING BEING TRANSFERRED", verdict)
         self.assertIn("KinectMonitor", verdict)
+
+    def test_staying_present_while_idle_points_at_streaming(self):
+        report = self._pipeline_report()
+        report.idle_watched = True
+        report.idle_dropouts = 0
+        verdict = " ".join(stability.interpret_monitor(report))
+        self.assertIn("ONLY CYCLES WHILE STREAMING", verdict)
+
+    def test_no_idle_pass_claims_nothing_about_it(self):
+        verdict = " ".join(stability.interpret_monitor(self._pipeline_report()))
+        self.assertNotIn("NOTHING BEING TRANSFERRED", verdict)
+        self.assertNotIn("ONLY CYCLES WHILE STREAMING", verdict)
 
     def test_a_depth_pass_that_produced_nothing_is_still_reported(self):
         # The gate is whether the second pass ran, not whether it got frames:

@@ -338,6 +338,11 @@ class MonitorReport:
     depth_frames: int = 0
     depth_events: list = field(default_factory=list)
     depth_watched: bool = False
+    # A third pass with the sensor open but no stream at all. If availability
+    # still cycles with nothing being transferred, the fault is in the device
+    # or the service rather than anywhere along the data path.
+    idle_watched: bool = False
+    idle_dropouts: int = 0
 
     @property
     def fps(self) -> float:
@@ -422,6 +427,35 @@ def _watch_depth_alone(duration: float, stall_seconds: float, progress=None):
     return frames_seen, events, True
 
 
+def _watch_availability_alone(duration: float, progress=None):
+    """Third pass: the sensor open, but not one stream requested.
+
+    Nothing is being transferred here, so anything that still cycles cannot
+    be about carrying data. It is the last thing that separates the device
+    and its service from everything downstream of them.
+    """
+    sensor = KinectSensor()
+    dropouts = 0
+    try:
+        sensor.open()
+        if not sensor.wait_until_available(timeout=8.0):
+            return 0, False
+        if progress:
+            progress("Third pass: watching the sensor with no stream open...")
+
+        deadline = time.perf_counter() + duration
+        was_available = True
+        while time.perf_counter() < deadline:
+            available = sensor.is_available
+            if was_available and not available:
+                dropouts += 1
+            was_available = available
+            time.sleep(0.1)
+    finally:
+        sensor.close()
+    return dropouts, True
+
+
 def monitor(duration: float = MONITOR_DURATION, stall_seconds: float = STALL_SECONDS,
             progress=None, on_event=None) -> MonitorReport:
     """Watches the colour stream for a long stretch and logs every freeze.
@@ -452,7 +486,7 @@ def monitor(duration: float = MONITOR_DURATION, stall_seconds: float = STALL_SEC
 
         # The budget is split between the two passes so the whole run still
         # takes about as long as before.
-        colour_duration = duration / 2
+        colour_duration = duration / 3
         if progress:
             progress(
                 f"First pass: watching colour for {colour_duration:.0f} seconds, "
@@ -512,7 +546,10 @@ def monitor(duration: float = MONITOR_DURATION, stall_seconds: float = STALL_SEC
     # Only worth a second pass if the first one actually found something.
     if report.events:
         report.depth_frames, report.depth_events, report.depth_watched = (
-            _watch_depth_alone(duration / 2, stall_seconds, progress)
+            _watch_depth_alone(duration / 3, stall_seconds, progress)
+        )
+        report.idle_dropouts, report.idle_watched = _watch_availability_alone(
+            duration / 3, progress
         )
 
     if report.events:
@@ -615,11 +652,35 @@ def interpret_monitor(report: MonitorReport) -> list:
                 )
             elif depth_stalls >= max(1, len(report.events) - 1):
                 lines.append(
-                    "DEPTH STALLED TOO, at much the same rate. The whole "
-                    "pipeline is going down, not just the heavy stream, which "
-                    "points at the sensor or the Kinect service rather than at "
-                    "bandwidth. Restarting the KinectMonitor service is worth a "
-                    "try, and so is checking that the sensor's fan spins."
+                    "DEPTH STALLED TOO, at much the same rate, on a link "
+                    "carrying nothing else. The pipeline goes down regardless "
+                    "of load, so bandwidth is not the constraint."
+                )
+
+        if report.idle_watched:
+            lines.append("")
+            lines.append(
+                f"Watched a third time with no stream open at all, the sensor "
+                f"dropped out {report.idle_dropouts} times."
+            )
+            if report.idle_dropouts:
+                lines.append(
+                    "IT CYCLES WITH NOTHING BEING TRANSFERRED. No data was "
+                    "being carried, so nothing along the data path can explain "
+                    "it: the device and the Kinect service are losing each "
+                    "other on their own. Restart the KinectMonitor service "
+                    "first. If the sensor behaves on an Xbox, that points at "
+                    "the Windows runtime rather than the hardware, and the "
+                    "runtime is known to be troublesome on recent Windows 11 "
+                    "builds."
+                )
+            else:
+                lines.append(
+                    "IT ONLY CYCLES WHILE STREAMING. Idle, the sensor stayed "
+                    "present throughout; the trouble starts when a stream is "
+                    "opened. That is the streaming pipeline rather than the "
+                    "device connection, which makes the Kinect service and the "
+                    "sensor's own streaming firmware the places to look."
                 )
         lines.append("")
         if logged != 0:
