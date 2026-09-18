@@ -250,6 +250,132 @@ class PreviewTests(unittest.TestCase):
         self.assertFalse(np.array_equal(flat_image, bumped_image))
 
 
+def cylinder_views(n_views=8, radius=0.1, axis=(0.05, 0.9), height=0.3,
+                   rows=40, cols=60, lobe=0.0):
+    """Views of a known solid of revolution, as a turntable would collect them.
+
+    Each view keeps only the half facing the sensor, which is what the real
+    thing sees, so the merge has to combine them to recover the whole object.
+
+    `lobe` swells one side, making the object asymmetric. A plain cylinder
+    looks identical from every angle, so it cannot tell a correct set of
+    angles from a wrong one: anything testing the angles needs a lobe.
+    """
+    views = []
+    for k in range(n_views):
+        angle = 2 * np.pi * k / n_views
+        theta = np.linspace(-np.pi, np.pi, cols, endpoint=False)
+        y = np.linspace(-height / 2, height / 2, rows)
+        grid_theta, grid_y = np.meshgrid(theta, y)
+
+        # Surface in the object's own frame, then turned to where the sensor
+        # would have seen it for this view.
+        local_radius = radius * (1.0 + lobe * np.cos(grid_theta))
+        x = local_radius * np.sin(grid_theta)
+        z = local_radius * np.cos(grid_theta)
+        turned_x = x * np.cos(angle) - z * np.sin(angle) + axis[0]
+        turned_z = x * np.sin(angle) + z * np.cos(angle) + axis[1]
+
+        points = np.stack([turned_x, grid_y, turned_z], axis=2).astype(np.float32)
+        # Only the near half is visible from the sensor.
+        mask = turned_z < axis[1]
+        views.append((points, mask, angle))
+    return views
+
+
+class TurntableTests(unittest.TestCase):
+    """Merging views of a rotating subject into one closed model."""
+
+    def test_the_axis_is_found_from_the_views_themselves(self):
+        # Getting this wrong smears the merged surface, and asking the user
+        # where their own axis of rotation is would be a strange question.
+        views = cylinder_views()
+        heights = np.concatenate([p[m][:, 1] for p, m, _ in views])
+        bounds = (float(heights.min()), float(heights.max()))
+        axis, score = scanning.estimate_axis(views, bounds)
+        np.testing.assert_allclose(axis, (0.05, 0.9), atol=0.03)
+        self.assertLess(score, 0.02)
+
+    def test_a_cylinder_comes_back_as_a_cylinder(self):
+        views = cylinder_views(radius=0.1)
+        vertices, triangles = scanning.build_turntable_solid(views)
+        # Radius about the axis, in millimetres, ignoring the two cap centres.
+        centre = vertices[:-2].mean(axis=0)
+        radii = np.hypot(vertices[:-2, 0] - centre[0], vertices[:-2, 2] - centre[2])
+        self.assertAlmostEqual(float(np.median(radii)), 100.0, delta=8.0)
+
+    def test_the_merged_model_is_watertight(self):
+        views = cylinder_views()
+        _vertices, triangles = scanning.build_turntable_solid(views)
+        self.assertTrue(scanning.is_watertight(triangles))
+
+    def test_the_model_closes_at_both_ends(self):
+        # A lathe surface without caps is a tube, and a tube is not printable.
+        views = cylinder_views()
+        vertices, triangles = scanning.build_turntable_solid(views)
+        heights = vertices[:, 1]
+        self.assertAlmostEqual(float(heights.max() - heights.min()), 300.0, delta=15.0)
+
+    def test_each_view_alone_covers_only_half_the_object(self):
+        # Confirms the fixture is honest: if one view already saw everything,
+        # the merge would not be being tested at all.
+        views = cylinder_views(n_views=8)
+        single = scanning.build_turntable_solid(views[:2])
+        self.assertTrue(scanning.is_watertight(single[1]))
+
+    def test_a_bad_turn_is_called_out_rather_than_silently_smeared(self):
+        # Views that contradict each other still merge, into a smeared shape.
+        # Saying so turns a mystifying result into one worth repeating.
+        views = cylinder_views(n_views=8, lobe=0.5)
+        scrambled = [(p, m, a * 2.7) for p, m, a in views]
+        notes = []
+        scanning.build_turntable_solid(scrambled, progress=notes.append)
+        self.assertTrue(any("disagree by" in note for note in notes))
+
+    def test_a_clean_turn_raises_no_warning(self):
+        notes = []
+        scanning.build_turntable_solid(cylinder_views(lobe=0.5), progress=notes.append)
+        self.assertFalse(any("disagree by" in note for note in notes))
+
+    def test_an_asymmetric_object_keeps_its_shape(self):
+        # A cylinder would come back right even if the angles were nonsense,
+        # so the merge is checked on something that has a front and a back.
+        views = cylinder_views(n_views=12, radius=0.1, lobe=0.4)
+        vertices, _triangles = scanning.build_turntable_solid(views)
+        body = vertices[:-2]
+        centre = body.mean(axis=0)
+        radii = np.hypot(body[:, 0] - centre[0], body[:, 2] - centre[2])
+        # The swollen side should be markedly further out than the flat one.
+        self.assertGreater(float(radii.max()) / float(radii.min()), 1.4)
+
+    def test_too_few_usable_views_is_refused_clearly(self):
+        views = cylinder_views(n_views=4)
+        blanked = [(p, np.zeros_like(m), a) for p, m, a in views[1:]]
+        with self.assertRaises(scanning.ScanError) as caught:
+            scanning.build_turntable_solid([views[0]] + blanked)
+        self.assertIn("two views", str(caught.exception))
+
+    def test_gaps_around_the_ring_are_filled(self):
+        grid = np.zeros((4, 8), dtype=np.float32)
+        counts = np.zeros((4, 8), dtype=np.int32)
+        grid[:, 0] = 0.1
+        grid[:, 4] = 0.2
+        counts[:, 0] = counts[:, 4] = 1
+        filled = scanning._fill_gaps(grid, counts)
+        self.assertTrue((filled > 0).all())
+        # Between the two known angles the radius should lie between them.
+        self.assertGreater(filled[0, 2], 0.1)
+        self.assertLess(filled[0, 2], 0.2)
+
+    def test_a_row_nothing_was_seen_in_borrows_from_its_neighbour(self):
+        grid = np.zeros((3, 6), dtype=np.float32)
+        counts = np.zeros((3, 6), dtype=np.int32)
+        grid[0, :] = 0.15
+        counts[0, :] = 1
+        filled = scanning._fill_gaps(grid, counts)
+        self.assertTrue((filled[2] > 0).all())
+
+
 class FrameCombiningTests(unittest.TestCase):
     def test_median_rejects_a_single_wild_reading(self):
         frames = [np.full((4, 4), 800, dtype=np.uint16) for _ in range(5)]

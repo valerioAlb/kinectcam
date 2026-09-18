@@ -48,6 +48,19 @@ PREVIEW_HINT = (
     "relief. What you see is what Scan to 3D model will capture."
 )
 
+# Twelve views over half a minute: one every two and a half seconds, which
+# is a pace a person on a swivel chair can actually hold.
+TURNTABLE_VIEWS = 12
+TURNTABLE_SECONDS = 30.0
+
+TURNTABLE_HINT = (
+    "Turn steadily through one full circle over the next 30 seconds; the "
+    "views are assumed to be evenly spaced, so a constant pace matters more "
+    "than a precise finish. The merged model is a lathe around your axis of "
+    "rotation, so it closes all the way round, but deep undercuts will fill "
+    "in: a head works, a teapot handle does not."
+)
+
 PEOPLE_HINT = (
     "Silhouette matting follows the outline of the person instead of cutting "
     "at a fixed distance, but body tracking needs to see head and torso at "
@@ -171,9 +184,14 @@ class KinectCamApp:
         ttk.Button(
             buttons, text="Hunt for freezes (90 s)", command=self._run_monitor
         ).grid(row=3, column=0, pady=(6, 0), sticky="ew")
-        ttk.Button(
+        self.scan_button = ttk.Button(
             buttons, text="Scan to 3D model (STL)", command=self._run_scan
-        ).grid(row=4, column=0, pady=(6, 0), sticky="ew")
+        )
+        self.scan_button.grid(row=4, column=0, pady=(6, 0), sticky="ew")
+        self.turntable_button = ttk.Button(
+            buttons, text="360 scan (turn slowly)", command=self._run_turntable
+        )
+        self.turntable_button.grid(row=5, column=0, pady=(6, 0), sticky="ew")
 
         self.status_var = tk.StringVar(value="Ready.")
         ttk.Label(outer, textvariable=self.status_var, wraplength=280).grid(
@@ -246,6 +264,18 @@ class KinectCamApp:
         # Turning the model only means anything while it is on screen.
         self.view_scale.configure(state="normal" if previewing else "disabled")
         self.view_label.configure(state="normal" if previewing else "disabled")
+
+        # With the preview live the button takes the shot on screen, which is
+        # a different enough act to deserve a different label.
+        self.scan_button.configure(
+            text="Capture this view to STL" if previewing and self.engine.running
+            else "Scan to 3D model (STL)"
+        )
+        # A full turn has to be captured from a running preview: it needs the
+        # sensor open for half a minute while the subject moves.
+        self.turntable_button.configure(
+            state="normal" if previewing and self.engine.running else "disabled"
+        )
 
     def _on_mode_changed(self, _event=None):
         self._sync_background_controls()
@@ -405,14 +435,77 @@ class KinectCamApp:
 
         threading.Thread(target=work, name="kinectcam-monitor", daemon=True).start()
 
+    def _run_turntable(self):
+        """Captures a full turn and merges the views into one closed model."""
+        if not (self.engine.running and self._selected_mode == Mode.SCAN_PREVIEW):
+            messagebox.showinfo(
+                "KinectCam",
+                "Start the 3D scan preview first, set the distance range so "
+                "only the subject is showing, then run the 360 scan.",
+                parent=self.root,
+            )
+            return
+
+        path = filedialog.asksaveasfilename(
+            parent=self.root, title="Save the 360 model",
+            defaultextension=".stl", initialfile="kinect-360.stl",
+            filetypes=[("STL model", "*.stl")],
+        )
+        if not path:
+            return
+
+        self._append_log(TURNTABLE_HINT)
+        self._set_status(f"360 scan: turn steadily for {TURNTABLE_SECONDS:.0f} seconds...")
+
+        def work():
+            try:
+                request = self.engine.request_turntable_scan(
+                    views=TURNTABLE_VIEWS, seconds=TURNTABLE_SECONDS
+                )
+                if request is None:
+                    raise scanning.ScanError("the preview stopped")
+                if request.error is not None:
+                    raise scanning.ScanError(str(request.error))
+
+                vertices, triangles = scanning.build_turntable_solid(
+                    request.captured, progress=self._post_status
+                )
+                scanning.write_stl(path, vertices, triangles)
+                sealed = scanning.is_watertight(triangles)
+                summary = scanning.describe(vertices, triangles)
+                sealed_note = (
+                    "Watertight, ready to slice." if sealed else
+                    "WARNING: the mesh is not watertight; a slicer may refuse it."
+                )
+                message = "\n".join([f"Saved {path}", summary, sealed_note])
+            except (scanning.ScanError, KinectError) as exc:
+                message = f"360 scan failed: {exc}"
+            except OSError as exc:
+                message = f"Could not write the file: {exc}"
+
+            def show():
+                self._append_log(message)
+                self._set_status("360 scan finished: see the log.")
+            self.root.after(0, show)
+
+        threading.Thread(target=work, name="kinectcam-turntable", daemon=True).start()
+
     def _post_log(self, message):
         self.root.after(0, self._append_log, message)
 
     # --- 3D scanning ----------------------------------------------------
 
     def _run_scan(self):
-        """Captures a burst of depth frames and saves a printable STL."""
-        if self._busy_with_sensor("scanning"):
+        """Captures a burst of depth frames and saves a printable STL.
+
+        When the preview is running the capture is served by it, so the shot
+        is taken from exactly the view on screen and nothing is interrupted.
+        Otherwise the sensor is opened just for the capture.
+        """
+        from_preview = (
+            self.engine.running and self._selected_mode == Mode.SCAN_PREVIEW
+        )
+        if not from_preview and self._busy_with_sensor("scanning"):
             return
 
         path = filedialog.asksaveasfilename(
@@ -437,9 +530,17 @@ class KinectCamApp:
 
         def work():
             try:
-                points, mask = scanning.capture(
-                    near_m=near, far_m=far, progress=self._post_status,
-                )
+                if from_preview:
+                    request = self.engine.request_scan()
+                    if request is None or request.error is not None:
+                        raise scanning.ScanError(
+                            str(request.error) if request else "the preview stopped"
+                        )
+                    points, mask = request.points, request.mask
+                else:
+                    points, mask = scanning.capture(
+                        near_m=near, far_m=far, progress=self._post_status,
+                    )
                 vertices, triangles = scanning.build_solid(points, mask)
                 scanning.write_stl(path, vertices, triangles)
                 summary = scanning.describe(vertices, triangles)

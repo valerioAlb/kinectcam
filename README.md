@@ -26,6 +26,7 @@ removes your background using depth instead of a green screen.
 | **Depth** | The raw 512x424 depth map, colour-coded from near (purple/blue) to far (yellow/red). |
 | **3D scan preview** | A live, shaded 3D view of what a scan would capture, turnable to any angle. |
 | **3D scan** | Captures the subject and writes a watertight STL, ready to slice and print. |
+| **360 scan** | Merges a full turn's worth of views into one closed model. |
 
 Plus: selectable output resolution, mirror, 180-degree rotation for an
 upside-down sensor, a live preview, and three built-in diagnostic tools for
@@ -197,6 +198,34 @@ How to get a good one:
 The model is written at **life size in millimetres**, so a face comes out
 around 200 mm tall. Scale it in your slicer to whatever you actually want to
 print.
+
+### Scanning all the way round
+
+**360 scan** merges a full turn into one closed model, so you get an object
+rather than a relief. Start the preview, set the distance range, then press it
+and **turn steadily through one full circle over thirty seconds**. Twelve views
+are taken along the way, one every two and a half seconds, and the preview
+keeps running in between so you can see yourself and hold position.
+
+The views are merged as a **lathe around your axis of rotation**: for every
+angle and height, the distance out to the surface. That closes all the way
+round by construction and needs no seam, but it also means **undercuts fill
+in**. A head works. A teapot with a handle does not: the gap under the handle
+has no radius to record.
+
+Two things decide whether it comes out sharp:
+
+- **A steady pace.** The views are assumed to be evenly spaced around the
+  circle, so rushing one part and dawdling in another puts the surface in the
+  wrong place. Finishing exactly at 360 degrees matters less than keeping the
+  speed constant.
+- **Turning about a fixed axis.** Rotating on a swivel chair is ideal. Shuffling
+  round on your feet moves the axis with you and smears the result.
+
+The axis itself is worked out from the views rather than assumed, by finding
+the position that makes them agree with each other. The log reports how well
+they ended up agreeing: **under 10 mm is a good turn**, and above 15 mm
+KinectCam says outright that the model will be smeared and why.
 
 Thirty frames are combined with a median rather than an average, which
 removes the sensor's speckle and discards the occasional wild reading instead
@@ -424,10 +453,12 @@ Python 3.10+, plus `numpy`, `pillow` and `pyvirtualcam` (see
   out of reach are the Kinect API's advanced audio features, such as knowing
   **which direction a voice is coming from**: using those would also require a
   virtual microphone driver.
-- **Scans are one-sided.** A time-of-flight camera sees the surface facing
-  it, so there is no way to get the back of a head from one position. A closed
-  model would mean capturing from several angles and registering them
-  together, which is a different project.
+- **A single scan is one-sided.** A time-of-flight camera sees the surface
+  facing it, so one capture is a relief. Use the 360 scan for a closed model.
+- **The 360 merge is a lathe, not a general reconstruction.** It records one
+  radius per angle and height, which closes reliably and cheaply but cannot
+  represent undercuts or anything hollow. The angles are assumed evenly spaced
+  rather than measured, so the turn has to be steady.
 - **No skeleton tracking.** The Kinect can track 25 joints per person
   (`IBodyFrameSource`). Only the body index is used here, i.e. which pixels
   belong to whom, not where the hands or the head are.

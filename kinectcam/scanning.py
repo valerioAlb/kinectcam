@@ -229,6 +229,271 @@ def _splat_radius(count: int, raster_w: int, raster_h: int) -> int:
     return int(np.clip(round((np.sqrt(per_point) - 1) / 2), 1, 3))
 
 
+# --- turntable scanning -------------------------------------------------
+
+# Resolution of the cylindrical grid the views are merged into. Finer than
+# the sensor can actually resolve is wasted: 512 depth columns spread over a
+# full turn is roughly this.
+TURNTABLE_ANGLES = 240
+TURNTABLE_ROWS = 260
+
+# How far around the axis to search when working out where it stands, and how
+# finely. A subject on a chair is rarely more than this far off centre.
+_AXIS_SEARCH_M = 0.15
+_AXIS_STEPS = 13
+
+# Above this much disagreement between views the merge is smeared rather
+# than sharp, and the user is better off knowing than wondering. Measured on
+# synthetic turns of a known object: correct angles land around 2 mm, a turn
+# that stopped halfway around 10 mm, and angles that are simply wrong at 18 mm
+# and up. The threshold sits above what sensor noise and an unsteady human
+# contribute, and below every failure that actually ruins the model.
+AGREEMENT_WARNING_M = 0.015
+
+
+def _cylindrical(points, mask, axis_xz, angle_rad):
+    """One view's points as (angle around the axis, height, radius).
+
+    The subject turned by `angle_rad` between the first view and this one, so
+    its points are turned back by the same amount to put every view into the
+    object's own frame.
+    """
+    selected = points[mask]
+    x = selected[:, 0] - axis_xz[0]
+    z = selected[:, 2] - axis_xz[1]
+
+    cos_a, sin_a = np.cos(-angle_rad), np.sin(-angle_rad)
+    rotated_x = x * cos_a - z * sin_a
+    rotated_z = x * sin_a + z * cos_a
+
+    theta = np.arctan2(rotated_x, rotated_z)
+    radius = np.hypot(rotated_x, rotated_z)
+    return theta, selected[:, 1], radius
+
+
+def _accumulate(views, axis_xz, bounds, n_angles, n_rows):
+    """Median radius per cell, and how many views contributed to each.
+
+    The median rather than the mean, and across views rather than within
+    one: a surface seen edge-on returns nonsense, and a view that saw it
+    properly should not have that averaged into it.
+    """
+    low_y, high_y = bounds
+    span = max(high_y - low_y, 1e-6)
+    samples = [[[] for _ in range(n_angles)] for _ in range(n_rows)]
+
+    for points, mask, angle in views:
+        theta, y, radius = _cylindrical(points, mask, axis_xz, angle)
+        inside = (y >= low_y) & (y <= high_y)
+        theta, y, radius = theta[inside], y[inside], radius[inside]
+
+        col = ((theta + np.pi) / (2 * np.pi) * n_angles).astype(np.int32) % n_angles
+        row = np.clip(((y - low_y) / span * (n_rows - 1)).astype(np.int32), 0, n_rows - 1)
+
+        # One view can hit a cell many times; its own median goes in, so a
+        # view contributes once however densely it happened to sample.
+        order = np.lexsort((radius, col, row))
+        keys = row[order] * n_angles + col[order]
+        starts = np.flatnonzero(np.r_[True, keys[1:] != keys[:-1]])
+        ends = np.r_[starts[1:], keys.size]
+        middles = (starts + ends) // 2
+        for key, middle in zip(keys[starts], middles):
+            samples[key // n_angles][key % n_angles].append(radius[order][middle])
+
+    grid = np.zeros((n_rows, n_angles), dtype=np.float32)
+    counts = np.zeros((n_rows, n_angles), dtype=np.int32)
+    for r in range(n_rows):
+        for c in range(n_angles):
+            values = samples[r][c]
+            if values:
+                grid[r, c] = float(np.median(values))
+                counts[r, c] = len(values)
+    return grid, counts
+
+
+def _disagreement(views, axis_xz, bounds, n_angles=60, n_rows=60) -> float:
+    """How much the views contradict each other about the surface.
+
+    With the axis in the right place every view reports the same radius for
+    the same patch of the object. With it in the wrong place they disagree,
+    and the disagreement grows with the error, which is what makes the axis
+    findable at all.
+    """
+    low_y, high_y = bounds
+    span = max(high_y - low_y, 1e-6)
+    total = np.zeros((n_rows, n_angles), dtype=np.float64)
+    total_sq = np.zeros_like(total)
+    counts = np.zeros_like(total)
+
+    for points, mask, angle in views:
+        theta, y, radius = _cylindrical(points, mask, axis_xz, angle)
+        inside = (y >= low_y) & (y <= high_y)
+        theta, y, radius = theta[inside], y[inside], radius[inside]
+        col = ((theta + np.pi) / (2 * np.pi) * n_angles).astype(np.int32) % n_angles
+        row = np.clip(((y - low_y) / span * (n_rows - 1)).astype(np.int32), 0, n_rows - 1)
+        flat = row * n_angles + col
+        seen = np.zeros(n_rows * n_angles, dtype=np.float64)
+        np.maximum.at(seen, flat, radius)
+        hit = seen > 0
+        total.ravel()[hit] += seen[hit]
+        total_sq.ravel()[hit] += seen[hit] ** 2
+        counts.ravel()[hit] += 1
+
+    shared = counts >= 2
+    if not shared.any():
+        return float("inf")
+    mean = total[shared] / counts[shared]
+    variance = total_sq[shared] / counts[shared] - mean ** 2
+    return float(np.sqrt(np.maximum(variance, 0)).mean())
+
+
+def estimate_axis(views, bounds):
+    """Where the turntable's axis stands, found by making the views agree.
+
+    Asking for the axis would be asking the wrong question of a person on a
+    swivel chair. Searching for it costs a fraction of a second and is what
+    decides whether the merged model is sharp or smeared.
+    """
+    first_points, first_mask, _angle = views[0]
+    seed = first_points[first_mask]
+    centre = np.array([np.median(seed[:, 0]), np.median(seed[:, 2])], dtype=np.float64)
+
+    offsets = np.linspace(-_AXIS_SEARCH_M, _AXIS_SEARCH_M, _AXIS_STEPS)
+    best, best_score = centre, float("inf")
+    for dx in offsets:
+        for dz in offsets:
+            candidate = centre + (dx, dz)
+            score = _disagreement(views, candidate, bounds)
+            if score < best_score:
+                best, best_score = candidate, score
+    return best, best_score
+
+
+def _fill_gaps(grid, counts):
+    """Gives every cell a radius, so the lathe has no missing rungs.
+
+    Cells nothing was seen in are filled around the ring first, since the
+    surface varies more slowly around the object than it does up it, then
+    from the rows above and below for rings that were never seen at all.
+    """
+    filled = grid.copy()
+    known = counts > 0
+    n_rows, n_angles = grid.shape
+
+    for row in range(n_rows):
+        present = np.flatnonzero(known[row])
+        if present.size == 0:
+            continue
+        # Interpolation that wraps: the ring has no ends to fall off.
+        angles = np.arange(n_angles)
+        extended = np.r_[present - n_angles, present, present + n_angles]
+        values = np.r_[filled[row, present], filled[row, present], filled[row, present]]
+        filled[row] = np.interp(angles, extended, values)
+        known[row] = True
+
+    empty_rows = np.flatnonzero(~known.any(axis=1))
+    solid_rows = np.flatnonzero(known.any(axis=1))
+    if solid_rows.size == 0:
+        raise ScanError("No view captured anything: nothing to merge.")
+    for row in empty_rows:
+        nearest = solid_rows[np.argmin(np.abs(solid_rows - row))]
+        filled[row] = filled[nearest]
+    return filled
+
+
+def lathe_mesh(radius_grid, low_y, high_y, axis_xz=(0.0, 0.0)):
+    """Closes a cylindrical height field into a solid, with caps at both ends.
+
+    Wrapping around the axis means the sides need no seam, and a fan to a
+    centre point at the top and bottom closes what is left. Every edge ends
+    up shared by exactly two triangles by construction.
+    """
+    n_rows, n_angles = radius_grid.shape
+    theta = np.linspace(-np.pi, np.pi, n_angles, endpoint=False)
+    y_values = np.linspace(low_y, high_y, n_rows)
+
+    x = radius_grid * np.sin(theta)[None, :] + axis_xz[0]
+    z = radius_grid * np.cos(theta)[None, :] + axis_xz[1]
+    y = np.repeat(y_values[:, None], n_angles, axis=1)
+    vertices = np.stack([x, y, z], axis=2).reshape(-1, 3)
+
+    index = np.arange(n_rows * n_angles).reshape(n_rows, n_angles)
+    right = np.roll(index, -1, axis=1)
+    lower_left, lower_right = index[:-1], right[:-1]
+    upper_left, upper_right = index[1:], right[1:]
+    walls = np.concatenate([
+        np.stack([lower_left.ravel(), lower_right.ravel(), upper_left.ravel()], axis=1),
+        np.stack([lower_right.ravel(), upper_right.ravel(), upper_left.ravel()], axis=1),
+    ])
+
+    bottom_centre = vertices.shape[0]
+    top_centre = bottom_centre + 1
+    vertices = np.concatenate([
+        vertices,
+        np.array([[axis_xz[0], low_y, axis_xz[1]],
+                  [axis_xz[0], high_y, axis_xz[1]]], dtype=vertices.dtype),
+    ])
+
+    ring = np.arange(n_angles)
+    next_ring = (ring + 1) % n_angles
+    bottom = np.stack([
+        np.full(n_angles, bottom_centre), index[0][next_ring], index[0][ring],
+    ], axis=1)
+    top = np.stack([
+        np.full(n_angles, top_centre), index[-1][ring], index[-1][next_ring],
+    ], axis=1)
+
+    triangles = np.concatenate([walls, bottom, top]).astype(np.int64)
+    return (vertices * METRES_TO_MM).astype(np.float32), triangles
+
+
+def build_turntable_solid(views, n_angles: int = TURNTABLE_ANGLES,
+                          n_rows: int = TURNTABLE_ROWS, progress=None):
+    """Merges views taken around a rotating subject into one closed model.
+
+    `views` is a sequence of (points, mask, angle in radians).
+    """
+    def announce(message):
+        if progress is not None:
+            progress(message)
+
+    usable = [view for view in views if view[1].any()]
+    if len(usable) < 2:
+        raise ScanError(
+            "Fewer than two views captured anything. Check the distance range "
+            "and that the subject stayed inside it while turning."
+        )
+
+    heights = np.concatenate([points[mask][:, 1] for points, mask, _ in usable])
+    low_y, high_y = float(np.percentile(heights, 1)), float(np.percentile(heights, 99))
+
+    announce("Working out where the rotation axis stands...")
+    axis, disagreement = estimate_axis(usable, (low_y, high_y))
+    announce(f"Axis found, views agree to within {disagreement * 1000:.0f} mm.")
+
+    # The views are assumed evenly spaced around a full turn. When they are
+    # not, they contradict each other about where the surface is and the
+    # merge smears rather than fails, which is worth saying out loud: a model
+    # that came out wrong for a knowable reason is easy to redo.
+    if disagreement > AGREEMENT_WARNING_M:
+        announce(
+            f"The views disagree by {disagreement * 1000:.0f} mm, which is a "
+            "lot: under 10 mm is a good turn. The merged surface will be "
+            "smeared. Usually it means the turn was not steady, or did not "
+            "complete a full circle, or the subject shifted relative to "
+            "whatever it was turning on."
+        )
+
+    announce(f"Merging {len(usable)} views...")
+    grid, counts = _accumulate(usable, axis, (low_y, high_y), n_angles, n_rows)
+    if not (counts > 0).any():
+        raise ScanError("The merged surface came out empty.")
+    grid = _fill_gaps(grid, counts)
+
+    announce("Closing the model...")
+    return lathe_mesh(grid, low_y, high_y)
+
+
 def _quad_grid(points: np.ndarray, mask: np.ndarray, max_step: float):
     """Cells of the pixel grid whose four corners form one continuous surface."""
     corners = (

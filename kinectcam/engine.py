@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ctypes
+import math
 import threading
 import time
 from dataclasses import dataclass, field
@@ -67,6 +68,49 @@ class MatteSource:
 
 
 MATTE_SOURCES = (MatteSource.DISTANCE, MatteSource.PEOPLE)
+
+
+@dataclass
+class ScanRequest:
+    """A capture asked for while the preview is running.
+
+    The sensor can only be open in one place at a time, so a scan taken
+    while the preview is live has to be served by the pipeline that already
+    holds it rather than by opening a second session.
+    """
+
+    frames: int
+    done: threading.Event = field(default_factory=threading.Event)
+    points: object = None
+    mask: object = None
+    error: object = None
+
+
+# A turntable view needs only a short burst: the subject is moving, and a
+# long one would smear the surface rather than steady it.
+TURNTABLE_FRAMES = 8
+
+
+@dataclass
+class TurntableRequest:
+    """A sequence of views taken while the subject turns through a full circle.
+
+    The angles are assumed to be evenly spaced over the run, so the subject
+    should turn at a steady pace. Views are taken one at a time from the
+    running pipeline, leaving the preview alive in between so there is
+    something to watch and something to hold position against.
+    """
+
+    views: int
+    seconds: float
+    done: threading.Event = field(default_factory=threading.Event)
+    captured: list = field(default_factory=list)
+    next_at: float = 0.0
+    error: object = None
+
+    @property
+    def interval(self) -> float:
+        return self.seconds / max(self.views, 1)
 
 
 class VirtualCamUnavailable(RuntimeError):
@@ -194,6 +238,28 @@ class _Pipeline:
         points = self.mapper.map_color_to_depth(self.depth)
         return image, self._build_matte(points)
 
+    def capture_points(self, frames: int, near_m: float, far_m: float):
+        """A burst from the depth stream this pipeline already owns."""
+        from . import scanning
+
+        collected = []
+        deadline = time.monotonic() + 15.0
+        while len(collected) < frames and time.monotonic() < deadline:
+            frame = self.depth.read()
+            if frame is None:
+                time.sleep(0.003)
+                continue
+            collected.append(frame.copy())
+
+        if len(collected) < 2:
+            raise scanning.ScanError(
+                "The sensor sent almost nothing during the capture."
+            )
+
+        self.depth.buffer[:] = scanning.combine_frames(collected)
+        points = self.mapper.map_depth_to_camera(self.depth).copy()
+        return points, scanning.subject_mask(points, near_m, far_m)
+
     def _build_matte(self, points):
         """Matte by person where possible, by distance where necessary.
 
@@ -249,6 +315,8 @@ class CaptureEngine:
         self._output_fps = 0.0
         self._device_name = ""
         self._settings = CaptureSettings()
+        self._scan_request = None
+        self._turntable_request = None
 
     # --- state ----------------------------------------------------------
 
@@ -287,6 +355,74 @@ class CaptureEngine:
             self._settings.far_mm = far_mm
         if view_angle is not None:
             self._settings.view_angle = view_angle
+
+    def request_scan(self, frames: int = 30, timeout: float = 30.0):
+        """Asks the running preview for a capture, and waits for it.
+
+        Returns the finished request, or None when nothing is previewing.
+        """
+        if not self.running or self._settings.mode != Mode.SCAN_PREVIEW:
+            return None
+        request = ScanRequest(frames=frames)
+        with self._lock:
+            self._scan_request = request
+        request.done.wait(timeout)
+        return request
+
+    def request_turntable_scan(self, views: int = 12, seconds: float = 30.0,
+                               timeout: float = 120.0):
+        """Asks the running preview for a full turn's worth of views."""
+        if not self.running or self._settings.mode != Mode.SCAN_PREVIEW:
+            return None
+        request = TurntableRequest(views=views, seconds=seconds)
+        request.next_at = time.monotonic() + request.interval
+        with self._lock:
+            self._turntable_request = request
+        request.done.wait(timeout)
+        return request
+
+    def _serve_turntable_request(self, pipeline):
+        request = self._turntable_request
+        if request is None or time.monotonic() < request.next_at:
+            return
+        try:
+            index = len(request.captured)
+            points, mask = pipeline.capture_points(
+                TURNTABLE_FRAMES,
+                self._settings.near_mm / 1000.0,
+                self._settings.far_mm / 1000.0,
+            )
+            angle = 2.0 * math.pi * index / request.views
+            request.captured.append((points, mask, angle))
+            self._on_status(
+                f"View {index + 1} of {request.views} captured, keep turning..."
+            )
+        except Exception as exc:  # noqa: BLE001 - reported to whoever asked
+            request.error = exc
+
+        if request.error is not None or len(request.captured) >= request.views:
+            with self._lock:
+                self._turntable_request = None
+            request.done.set()
+        else:
+            request.next_at = time.monotonic() + request.interval
+
+    def _serve_scan_request(self, pipeline):
+        with self._lock:
+            request, self._scan_request = self._scan_request, None
+        if request is None:
+            return
+        try:
+            self._on_status("Capturing, hold still...")
+            request.points, request.mask = pipeline.capture_points(
+                request.frames,
+                self._settings.near_mm / 1000.0,
+                self._settings.far_mm / 1000.0,
+            )
+        except Exception as exc:  # noqa: BLE001 - reported to whoever asked
+            request.error = exc
+        finally:
+            request.done.set()
 
     # --- control --------------------------------------------------------
 
@@ -430,6 +566,10 @@ class CaptureEngine:
             starved = False
 
             while not self._stop.is_set():
+                if self._scan_request is not None:
+                    self._serve_scan_request(pipeline)
+                if self._turntable_request is not None:
+                    self._serve_turntable_request(pipeline)
                 image, matte = pipeline.next_frame()
                 if image is not None:
                     last_output = self._compose(image, matte)
