@@ -319,6 +319,44 @@ _PKEY_FRIENDLY_NAME = "{b3f8fa53-0004-438e-9003-51a46e139bfc},6"
 # PKEY_AudioEndpoint_Disable_SysFx: 1 means the enhancements are switched off.
 _PKEY_DISABLE_SYSFX = "{1da5d803-d492-4edd-8c23-e0c0ffee7f0e},5"
 
+# DEVICE_STATE_ACTIVE, i.e. the endpoint is present and usable.
+_DEVICE_STATE_ACTIVE = 1
+
+
+def _read_property(root, endpoint, subkey, value_name):
+    try:
+        with winreg.OpenKey(root, f"{endpoint}\\{subkey}") as key:
+            value, _ = winreg.QueryValueEx(key, value_name)
+            return value
+    except OSError:
+        return None
+
+
+def _kinect_capture_endpoints(root):
+    """Endpoint keys whose friendly name looks like the Kinect's microphone.
+
+    Active ones come first: Windows keeps the keys of endpoints that are not
+    plugged in, and reading a stale one would report a setting nobody can see.
+    """
+    found = []
+    index = 0
+    while True:
+        try:
+            endpoint = winreg.EnumKey(root, index)
+        except OSError:
+            break
+        index += 1
+        name = _read_property(root, endpoint, "Properties", _PKEY_FRIENDLY_NAME)
+        if name and re.search(r"NUI|Kinect", str(name), re.IGNORECASE):
+            state = None
+            try:
+                with winreg.OpenKey(root, endpoint) as key:
+                    state, _ = winreg.QueryValueEx(key, "DeviceState")
+            except OSError:
+                pass
+            found.append((state != _DEVICE_STATE_ACTIVE, endpoint))
+    return [endpoint for _inactive, endpoint in sorted(found)]
+
 
 def kinect_audio_enhancements_enabled():
     """True when Windows audio enhancements are active on the Kinect's mic array.
@@ -334,26 +372,22 @@ def kinect_audio_enhancements_enabled():
     """
     try:
         with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, _CAPTURE_ENDPOINTS) as root:
-            index = 0
-            while True:
-                try:
-                    endpoint = winreg.EnumKey(root, index)
-                except OSError:
-                    return None
-                index += 1
-                try:
-                    with winreg.OpenKey(root, endpoint + r"\Properties") as props:
-                        name, _ = winreg.QueryValueEx(props, _PKEY_FRIENDLY_NAME)
-                        if not re.search(r"NUI|Kinect", str(name), re.IGNORECASE):
-                            continue
-                        try:
-                            disabled, _ = winreg.QueryValueEx(props, _PKEY_DISABLE_SYSFX)
-                        except OSError:
-                            # Never set means Windows is applying its defaults.
-                            return True
-                        return int(disabled) != 1
-                except OSError:
-                    continue
+            endpoints = _kinect_capture_endpoints(root)
+            if not endpoints:
+                return None
+            endpoint = endpoints[0]
+            # Windows writes this under FxProperties, where the endpoint's
+            # effects live. Older releases put it in Properties, so both are
+            # read: looking only in Properties finds nothing on Windows 11 and
+            # reports enhancements as on for someone who has just turned them
+            # off, which is worse than not checking at all.
+            for subkey in ("FxProperties", "Properties"):
+                disabled = _read_property(root, endpoint, subkey, _PKEY_DISABLE_SYSFX)
+                if disabled is not None:
+                    return int(disabled) != 1
+            # Absent from both means Windows is applying its defaults, which
+            # leave the enhancements on.
+            return True
     except OSError:
         return None
 

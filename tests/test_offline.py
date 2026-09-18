@@ -836,6 +836,39 @@ class AudioEnhancementTests(unittest.TestCase):
             self.assertIn("audio enhancements", check.hint)
             self.assertIn("muted", check.hint)
 
+    def _with_registry(self, values):
+        """Runs the query against a fake registry, returning its verdict.
+
+        `values` maps a subkey name to the Disable_SysFx value stored there.
+        """
+        original_read = diagnostics._read_property
+        original_endpoints = diagnostics._kinect_capture_endpoints
+        diagnostics._kinect_capture_endpoints = lambda _root: ["fake-endpoint"]
+        diagnostics._read_property = (
+            lambda _root, _endpoint, subkey, _name: values.get(subkey)
+        )
+        try:
+            return diagnostics.kinect_audio_enhancements_enabled()
+        finally:
+            diagnostics._read_property = original_read
+            diagnostics._kinect_capture_endpoints = original_endpoints
+
+    def test_the_setting_is_read_from_fxproperties(self):
+        # Windows 11 writes it there. Reading only Properties finds nothing
+        # and reports enhancements as on for someone who has just turned them
+        # off, which sends them to fix something already fixed.
+        self.assertFalse(self._with_registry({"FxProperties": 1}))
+        self.assertTrue(self._with_registry({"FxProperties": 0}))
+
+    def test_older_windows_keeps_it_under_properties(self):
+        self.assertFalse(self._with_registry({"Properties": 1}))
+
+    def test_fxproperties_wins_when_both_exist(self):
+        self.assertFalse(self._with_registry({"FxProperties": 1, "Properties": 0}))
+
+    def test_absent_everywhere_means_windows_defaults_are_in_force(self):
+        self.assertTrue(self._with_registry({}))
+
     def test_a_missing_endpoint_is_not_reported_as_a_fault(self):
         # With no Kinect plugged in there is no endpoint to inspect, and that
         # is not evidence of anything.
