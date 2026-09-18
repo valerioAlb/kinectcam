@@ -7,7 +7,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 
-from . import frames
+from . import frames, scanning
 from .kinect_native import KinectError, KinectSensor
 
 COINIT_MULTITHREADED = 0x0
@@ -34,6 +34,7 @@ class Mode:
     COLOR_NO_BACKGROUND = "color_nobg"
     DEPTH = "depth"
     INFRARED = "infrared"
+    SCAN_PREVIEW = "scan_preview"
 
 
 MODE_LABELS = {
@@ -41,6 +42,7 @@ MODE_LABELS = {
     Mode.COLOR_NO_BACKGROUND: "Colour, background removed",
     Mode.INFRARED: "Night vision (infrared)",
     Mode.DEPTH: "Depth (512x424)",
+    Mode.SCAN_PREVIEW: "3D scan preview",
 }
 
 OUTPUT_SIZES = {
@@ -81,6 +83,8 @@ class CaptureSettings:
     matte_source: str = MatteSource.DISTANCE
     near_mm: int = NEAR_LIMIT_MM
     far_mm: int = DEFAULT_FAR_MM
+    # Where the 3D preview looks from, in degrees around the vertical axis.
+    view_angle: float = 0.0
 
 
 @dataclass
@@ -118,6 +122,11 @@ class _Pipeline:
                 self.body_index = self.sensor.body_index_stream()
         if mode == Mode.DEPTH:
             self.depth = self.sensor.depth_stream()
+        if mode == Mode.SCAN_PREVIEW:
+            # The same two sources a scan uses, so what the preview shows is
+            # what a capture would record.
+            self.depth = self.sensor.depth_stream()
+            self.mapper = self.sensor.coordinate_mapper()
         if mode == Mode.INFRARED:
             self.infrared = self.sensor.infrared_stream()
             self.normalizer = frames.InfraredNormalizer()
@@ -153,6 +162,18 @@ class _Pipeline:
         if mode == Mode.INFRARED:
             raw = self.infrared.read()
             return (None, None) if raw is None else (self.normalizer.apply(raw), None)
+
+        if mode == Mode.SCAN_PREVIEW:
+            if self.depth.read() is None:
+                return None, None
+            points = self.mapper.map_depth_to_camera(self.depth)
+            settings = self.settings
+            visible = scanning.subject_mask(
+                points, settings.near_mm / 1000.0, settings.far_mm / 1000.0
+            )
+            return scanning.render_preview(
+                points, visible, settings.output_size, settings.view_angle
+            ), None
 
         raw = self.color.read()
         if raw is None:
@@ -255,7 +276,8 @@ class CaptureEngine:
             preview, self._preview = self._preview, None
         return preview
 
-    def update_live_settings(self, background=None, near_mm=None, far_mm=None):
+    def update_live_settings(self, background=None, near_mm=None, far_mm=None,
+                             view_angle=None):
         """Adjustments that apply while running, without reopening the sensor."""
         if background is not None:
             self._settings.background = background
@@ -263,6 +285,8 @@ class CaptureEngine:
             self._settings.near_mm = near_mm
         if far_mm is not None:
             self._settings.far_mm = far_mm
+        if view_angle is not None:
+            self._settings.view_angle = view_angle
 
     # --- control --------------------------------------------------------
 

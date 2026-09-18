@@ -24,6 +24,7 @@ removes your background using depth instead of a green screen.
 | **Colour, background removed** | Same image, but the background is cut out using the depth sensor. No green screen. |
 | **Night vision (infrared)** | The 512x424 infrared camera. The Kinect lights the scene with its own emitter, so it **sees with the lights off**. Exposure adapts to the scene automatically. |
 | **Depth** | The raw 512x424 depth map, colour-coded from near (purple/blue) to far (yellow/red). |
+| **3D scan preview** | A live, shaded 3D view of what a scan would capture, turnable to any angle. |
 | **3D scan** | Captures the subject and writes a watertight STL, ready to slice and print. |
 
 Plus: selectable output resolution, mirror, 180-degree rotation for an
@@ -172,6 +173,17 @@ camera, not a scanner that orbits its subject: it sees one side of what is in
 front of it, so a capture is a height field. Your face, not your head. The
 surface is given a flat back and a rim joining the two, which turns an open
 shell into a watertight solid, and that prints well as a plaque.
+
+**Set the range with the preview, not by guessing.** Pick the **3D scan
+preview** mode and press Start: the sensor's view appears as a shaded 3D
+surface showing only what falls inside the distance range. Pull the distance
+slider in until the room drops away and only you are left standing, and drag
+the **3D view angle** slider to turn the model and see yourself in relief
+before committing to a capture. What the preview shows is what the scan
+records.
+
+The preview runs at the sensor's full rate, so both sliders respond as you
+move them.
 
 How to get a good one:
 

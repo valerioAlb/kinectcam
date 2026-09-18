@@ -18,6 +18,7 @@ import time
 import warnings
 
 import numpy as np
+from PIL import Image
 
 METRES_TO_MM = 1000.0
 
@@ -121,6 +122,111 @@ def subject_mask(points: np.ndarray, near_m: float, far_m: float) -> np.ndarray:
     """
     z = points[:, :, 2]
     return np.isfinite(z) & (z >= near_m) & (z <= far_m)
+
+
+# --- live preview -------------------------------------------------------
+
+# The preview is rasterised at roughly one pixel per sampled point and then
+# scaled up. Rendering straight to the output size would leave the surface
+# full of gaps, because 512x424 points cannot cover a 1280x720 frame.
+PREVIEW_RASTER = (400, 300)
+
+# A light placed up and to the left of the viewer. Lighting straight down the
+# view direction flattens everything, which is the opposite of the point.
+_LIGHT = np.array([-0.4, 0.5, -0.75], dtype=np.float32)
+
+_SURFACE_RGB = np.array([235, 214, 186], dtype=np.float32)
+_BACKDROP_RGB = (24, 26, 32)
+_AMBIENT = 0.25
+
+
+def surface_normals(points: np.ndarray) -> np.ndarray:
+    """Unit normals of the height field, from differences with its neighbours."""
+    padded = np.pad(points, ((1, 1), (1, 1), (0, 0)), mode="edge")
+    along_x = padded[1:-1, 2:] - padded[1:-1, :-2]
+    along_y = padded[2:, 1:-1] - padded[:-2, 1:-1]
+    normals = np.cross(along_x, along_y)
+    lengths = np.linalg.norm(normals, axis=2, keepdims=True)
+    return np.divide(normals, lengths, out=np.zeros_like(normals), where=lengths > 0)
+
+
+def _rotation(yaw_deg: float, pitch_deg: float) -> np.ndarray:
+    yaw, pitch = np.radians(yaw_deg), np.radians(pitch_deg)
+    cy, sy = np.cos(yaw), np.sin(yaw)
+    cp, sp = np.cos(pitch), np.sin(pitch)
+    around_y = np.array([[cy, 0, sy], [0, 1, 0], [-sy, 0, cy]], dtype=np.float32)
+    around_x = np.array([[1, 0, 0], [0, cp, -sp], [0, sp, cp]], dtype=np.float32)
+    return (around_x @ around_y).astype(np.float32)
+
+
+def render_preview(points: np.ndarray, mask: np.ndarray, size,
+                   yaw_deg: float = 0.0, pitch_deg: float = -12.0) -> np.ndarray:
+    """A shaded view of what the scan would capture, from any angle.
+
+    Only the points inside the distance range are drawn, so the picture
+    doubles as a way to see where that range currently falls: turn the dial
+    until the room disappears and only the subject is left standing.
+    """
+    width, height = size
+    canvas = np.zeros((PREVIEW_RASTER[1], PREVIEW_RASTER[0], 3), dtype=np.uint8)
+    canvas[:, :] = _BACKDROP_RGB
+
+    if not mask.any():
+        return np.asarray(
+            Image.fromarray(canvas).resize((width, height), Image.NEAREST)
+        )
+
+    normals = surface_normals(points)[mask]
+    selected = points[mask]
+
+    rotation = _rotation(yaw_deg, pitch_deg)
+    centre = selected.mean(axis=0)
+    viewed = (selected - centre) @ rotation.T
+    lit = normals @ rotation.T
+
+    # Orthographic: fit the subject to the raster with a little margin. The
+    # extent comes from a percentile rather than the maximum, because one
+    # stray point at the edge of the range would otherwise set the scale and
+    # shrink the subject to a speck in the middle of the frame.
+    raster_w, raster_h = PREVIEW_RASTER
+    extent = float(np.percentile(np.abs(viewed[:, :2]), 98))
+    if extent <= 0:
+        extent = 1e-3
+    scale = 0.45 * min(raster_w, raster_h) / extent
+    px = np.clip((viewed[:, 0] * scale + raster_w / 2), 0, raster_w - 1).astype(np.int32)
+    # Screen y grows downward while the sensor's y grows upward.
+    py = np.clip((-viewed[:, 1] * scale + raster_h / 2), 0, raster_h - 1).astype(np.int32)
+
+    light = _LIGHT / np.linalg.norm(_LIGHT)
+    shade = np.clip(lit @ light, 0.0, 1.0) * (1.0 - _AMBIENT) + _AMBIENT
+    colours = np.clip(shade[:, None] * _SURFACE_RGB, 0, 255).astype(np.uint8)
+
+    # Painter's algorithm: draw far points first and let nearer ones land on
+    # top. Cheaper than a real z-buffer and indistinguishable at this size.
+    order = np.argsort(-viewed[:, 2])
+    px, py, colours = px[order], py[order], colours[order]
+
+    # One point per pixel leaves the surface looking like scattered dust,
+    # because the subject rarely has as many samples as the raster has
+    # pixels. Each point is drawn as a small square, sized from how thinly
+    # the points are actually spread.
+    radius = _splat_radius(px.size, raster_w, raster_h)
+    for dy in range(-radius, radius + 1):
+        rows = np.clip(py + dy, 0, raster_h - 1)
+        for dx in range(-radius, radius + 1):
+            canvas[rows, np.clip(px + dx, 0, raster_w - 1)] = colours
+
+    return np.asarray(Image.fromarray(canvas).resize((width, height), Image.BILINEAR))
+
+
+def _splat_radius(count: int, raster_w: int, raster_h: int) -> int:
+    """How far to spread each point so the surface reads as solid."""
+    if count <= 0:
+        return 1
+    # The subject covers roughly 80% of the raster once fitted to it.
+    covered = 0.8 * raster_w * raster_h
+    per_point = covered / count
+    return int(np.clip(round((np.sqrt(per_point) - 1) / 2), 1, 3))
 
 
 def _quad_grid(points: np.ndarray, mask: np.ndarray, max_step: float):

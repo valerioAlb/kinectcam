@@ -177,6 +177,79 @@ class SolidTests(unittest.TestCase):
         self.assertGreater(back_count, 0)
 
 
+class PreviewTests(unittest.TestCase):
+    """The live 3D view, which is also how the distance range gets tuned."""
+
+    def _scene(self):
+        points = dome(40, 48)
+        return points, scanning.subject_mask(points, 0.7, 0.9)
+
+    def test_the_frame_comes_out_at_the_requested_size(self):
+        points, mask = self._scene()
+        image = scanning.render_preview(points, mask, (320, 180))
+        self.assertEqual(image.shape, (180, 320, 3))
+        self.assertEqual(image.dtype, np.uint8)
+
+    def test_an_empty_range_draws_only_the_backdrop(self):
+        points, _mask = self._scene()
+        nothing = np.zeros(points.shape[:2], dtype=bool)
+        image = scanning.render_preview(points, nothing, (64, 48))
+        self.assertTrue((image.reshape(-1, 3) == scanning._BACKDROP_RGB).all())
+
+    def test_turning_the_view_changes_what_is_drawn(self):
+        points, mask = self._scene()
+        straight = scanning.render_preview(points, mask, (160, 120), yaw_deg=0)
+        turned = scanning.render_preview(points, mask, (160, 120), yaw_deg=40)
+        self.assertFalse(np.array_equal(straight, turned))
+
+    def test_narrowing_the_range_removes_surface(self):
+        # This is what makes the preview useful for setting the range: pull
+        # the limit in and the far half of the scene should disappear.
+        points = dome(40, 48)
+        wide = scanning.subject_mask(points, 0.5, 1.2)
+        narrow = scanning.subject_mask(points, 0.5, 0.77)
+        self.assertLess(narrow.sum(), wide.sum())
+        drawn = lambda m: (scanning.render_preview(points, m, (160, 120))
+                           .reshape(-1, 3) != scanning._BACKDROP_RGB).any(axis=1).sum()
+        self.assertLess(drawn(narrow), drawn(wide))
+
+    def test_one_stray_point_does_not_shrink_the_subject(self):
+        # The scale used to come from the maximum, so a single noisy point at
+        # the edge of the range set it and the subject rendered as a speck.
+        points, mask = self._scene()
+        clean = scanning.render_preview(points, mask, (200, 150))
+        points[0, 0] = (5.0, 5.0, 0.8)
+        mask[0, 0] = True
+        with_outlier = scanning.render_preview(points, mask, (200, 150))
+
+        def coverage(image):
+            return (image.reshape(-1, 3) != scanning._BACKDROP_RGB).any(axis=1).mean()
+
+        self.assertGreater(coverage(with_outlier), coverage(clean) * 0.5)
+
+    def test_the_splat_grows_when_points_are_sparse(self):
+        # Few points over a large raster need spreading, or the surface reads
+        # as scattered dust rather than a solid.
+        self.assertGreaterEqual(scanning._splat_radius(500, 400, 300),
+                                scanning._splat_radius(200000, 400, 300))
+        self.assertGreaterEqual(scanning._splat_radius(0, 400, 300), 1)
+
+    def test_normals_of_a_flat_surface_all_agree(self):
+        points = dome(10, 10, bump=0.0)
+        normals = scanning.surface_normals(points)
+        reference = normals[5, 5]
+        self.assertAlmostEqual(float(np.linalg.norm(reference)), 1.0, places=4)
+        self.assertGreater(abs(float(reference[2])), 0.99)
+
+    def test_a_sloped_surface_shades_differently_from_a_flat_one(self):
+        flat = dome(30, 30, bump=0.0)
+        bumped = dome(30, 30, bump=0.04)
+        mask = np.ones(flat.shape[:2], dtype=bool)
+        flat_image = scanning.render_preview(flat, mask, (160, 120))
+        bumped_image = scanning.render_preview(bumped, mask, (160, 120))
+        self.assertFalse(np.array_equal(flat_image, bumped_image))
+
+
 class FrameCombiningTests(unittest.TestCase):
     def test_median_rejects_a_single_wild_reading(self):
         frames = [np.full((4, 4), 800, dtype=np.uint16) for _ in range(5)]

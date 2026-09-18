@@ -41,6 +41,13 @@ SCAN_HINT = (
     "and use the distance slider to leave the room behind you out."
 )
 
+PREVIEW_HINT = (
+    "The 3D preview shows only what is inside the distance range, shaded as "
+    "the model would be. Drag the distance slider until the room falls away "
+    "and just you are left, then turn the view angle to see yourself in "
+    "relief. What you see is what Scan to 3D model will capture."
+)
+
 PEOPLE_HINT = (
     "Silhouette matting follows the outline of the person instead of cutting "
     "at a fixed distance, but body tracking needs to see head and torso at "
@@ -126,18 +133,27 @@ class KinectCamApp:
         )
         self.distance_scale.grid(row=9, column=0, pady=(0, 8), sticky="ew")
 
+        self.view_label = ttk.Label(controls, text="3D view angle: straight on")
+        self.view_label.grid(row=10, column=0, sticky="w")
+        self.view_var = tk.DoubleVar(value=0.0)
+        self.view_scale = ttk.Scale(
+            controls, from_=-60.0, to=60.0,
+            variable=self.view_var, command=self._on_view_angle_moved,
+        )
+        self.view_scale.grid(row=11, column=0, pady=(0, 8), sticky="ew")
+
         self.mirror_var = tk.BooleanVar(value=True)
         self.mirror_check = ttk.Checkbutton(
             controls, text="Mirror image", variable=self.mirror_var
         )
-        self.mirror_check.grid(row=10, column=0, sticky="w")
+        self.mirror_check.grid(row=12, column=0, sticky="w")
 
         self.rotate_var = tk.BooleanVar(value=False)
         self.rotate_check = ttk.Checkbutton(
             controls, text="Rotate 180 degrees (sensor mounted upside down)",
             variable=self.rotate_var,
         )
-        self.rotate_check.grid(row=11, column=0, sticky="w")
+        self.rotate_check.grid(row=13, column=0, sticky="w")
 
         buttons = ttk.Frame(outer)
         buttons.grid(row=1, column=1, pady=10, sticky="ew")
@@ -222,14 +238,21 @@ class KinectCamApp:
         self.matte_box.configure(state="readonly" if can_pick else "disabled")
         self.matte_label.configure(state="normal" if can_pick else "disabled")
 
-        tunable = active and by_distance
+        previewing = self._selected_mode == Mode.SCAN_PREVIEW
+        tunable = (active and by_distance) or previewing
         self.distance_scale.configure(state="normal" if tunable else "disabled")
         self.distance_label.configure(state="normal" if tunable else "disabled")
+
+        # Turning the model only means anything while it is on screen.
+        self.view_scale.configure(state="normal" if previewing else "disabled")
+        self.view_label.configure(state="normal" if previewing else "disabled")
 
     def _on_mode_changed(self, _event=None):
         self._sync_background_controls()
         if self._selected_mode == Mode.COLOR_NO_BACKGROUND:
             self._append_log(BACKGROUND_HINT)
+        elif self._selected_mode == Mode.SCAN_PREVIEW:
+            self._append_log(PREVIEW_HINT)
 
     def _on_matte_source_changed(self, _event=None):
         self._sync_background_controls()
@@ -241,6 +264,16 @@ class KinectCamApp:
             text=f"Keep whatever is within {self.distance_var.get():.1f} m"
         )
         self._on_live_changed()
+
+    def _on_view_angle_moved(self, _value=None):
+        angle = self.view_var.get()
+        if abs(angle) < 3:
+            where = "straight on"
+        else:
+            where = f"{abs(angle):.0f} degrees from the {'left' if angle < 0 else 'right'}"
+        self.view_label.configure(text=f"3D view angle: {where}")
+        if self.engine.running:
+            self.engine.update_live_settings(view_angle=angle)
 
     def _on_live_changed(self, _event=None):
         """Background and distance can be changed while the engine runs."""
@@ -270,6 +303,7 @@ class KinectCamApp:
             matte_source=self.matte_var.get(),
             near_mm=NEAR_LIMIT_MM,
             far_mm=int(self.distance_var.get() * 1000),
+            view_angle=self.view_var.get(),
         )
         self._set_controls_enabled(False)
         self.toggle_button.configure(text="Stop virtual camera")
