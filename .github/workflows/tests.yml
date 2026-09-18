@@ -31,4 +31,6 @@ jobs:
         # the suite is built for: the tests needing real hardware skip
         # themselves, and the vtable indices are still checked against the
         # method order declared in Kinect.h.
-        run: python tests/test_offline.py
+        run: |
+          python tests/test_offline.py
+          python tests/test_scanning.py

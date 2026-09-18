@@ -1,4 +1,4 @@
-# Builds KinectCam.exe (single file, no console window).
+﻿# Builds KinectCam.exe (single file, no console window).
 # Requires Python 3.10+ on PATH. Administrator rights are not needed.
 
 $ErrorActionPreference = "Stop"
@@ -35,6 +35,7 @@ Invoke-Native $python @("-m", "pip", "install", "--quiet", "-r", "requirements.t
 
 Write-Host "Running the test suite..." -ForegroundColor Cyan
 Invoke-Native $python @("tests\test_offline.py") "Test suite"
+Invoke-Native $python @("tests\test_scanning.py") "Scanning test suite"
 
 Write-Host "Building the executable..." -ForegroundColor Cyan
 Invoke-Native $python @(
@@ -55,3 +56,4 @@ if (-not (Test-Path $exe)) { throw "Build failed: KinectCam.exe was not produced
 $sizeMb = [math]::Round((Get-Item $exe).Length / 1MB, 1)
 Write-Host ""
 Write-Host "Done: $exe ($sizeMb MB)" -ForegroundColor Green
+

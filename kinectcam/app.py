@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import threading
 import tkinter as tk
-from tkinter import messagebox, ttk
+from tkinter import filedialog, messagebox, ttk
 
 from PIL import Image, ImageTk
 
-from . import diagnostics, frames, stability
+from . import diagnostics, frames, scanning, stability
 from .engine import (
     DEFAULT_OUTPUT_SIZE,
     FAR_LIMIT_MM,
@@ -32,6 +32,13 @@ LABEL_TO_MODE = {label: mode for mode, label in MODE_LABELS.items()}
 # Worth saying up front rather than leaving it to be discovered.
 BACKGROUND_HINT = (
     "Tip: with background removal, 960x540 keeps a full 30 fps."
+)
+
+SCAN_HINT = (
+    "The sensor sees one side of things, so a scan comes out as a relief: "
+    "your face, not your head. It is given a flat back so a slicer will "
+    "accept it. Sit about 70 cm away, hold still for a couple of seconds, "
+    "and use the distance slider to leave the room behind you out."
 )
 
 PEOPLE_HINT = (
@@ -148,6 +155,9 @@ class KinectCamApp:
         ttk.Button(
             buttons, text="Hunt for freezes (90 s)", command=self._run_monitor
         ).grid(row=3, column=0, pady=(6, 0), sticky="ew")
+        ttk.Button(
+            buttons, text="Scan to 3D model (STL)", command=self._run_scan
+        ).grid(row=4, column=0, pady=(6, 0), sticky="ew")
 
         self.status_var = tk.StringVar(value="Ready.")
         ttk.Label(outer, textvariable=self.status_var, wraplength=280).grid(
@@ -363,6 +373,60 @@ class KinectCamApp:
 
     def _post_log(self, message):
         self.root.after(0, self._append_log, message)
+
+    # --- 3D scanning ----------------------------------------------------
+
+    def _run_scan(self):
+        """Captures a burst of depth frames and saves a printable STL."""
+        if self._busy_with_sensor("scanning"):
+            return
+
+        path = filedialog.asksaveasfilename(
+            parent=self.root, title="Save the 3D model",
+            defaultextension=".stl", initialfile="kinect-scan.stl",
+            filetypes=[("STL model", "*.stl")],
+        )
+        if not path:
+            return
+
+        near = scanning.DEFAULT_NEAR_M
+        far = max(self.distance_var.get(), near + 0.1)
+        self._set_status("Scanning: hold still...")
+        self._append_log(SCAN_HINT)
+        self._append_log(
+            f"Capturing everything between {near:.1f} and {far:.1f} m. "
+            + ("That will take in the room behind you; drag the distance "
+               "slider down to just past the subject."
+               if far > 1.5 else
+               "Anything beyond that is left out.")
+        )
+
+        def work():
+            try:
+                points, mask = scanning.capture(
+                    near_m=near, far_m=far, progress=self._post_status,
+                )
+                vertices, triangles = scanning.build_solid(points, mask)
+                scanning.write_stl(path, vertices, triangles)
+                summary = scanning.describe(vertices, triangles)
+                sealed = scanning.is_watertight(triangles)
+                message = (
+                    f"Saved {path}\n{summary}\n"
+                    + ("Watertight, ready to slice."
+                       if sealed else
+                       "WARNING: the mesh is not watertight; a slicer may refuse it.")
+                )
+            except (scanning.ScanError, KinectError) as exc:
+                message = f"Scan failed: {exc}"
+            except OSError as exc:
+                message = f"Could not write the file: {exc}"
+
+            def show():
+                self._append_log(message)
+                self._set_status("Scan finished: see the log.")
+            self.root.after(0, show)
+
+        threading.Thread(target=work, name="kinectcam-scan", daemon=True).start()
 
     # --- preview --------------------------------------------------------
 

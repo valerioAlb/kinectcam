@@ -1,3 +1,3 @@
-"""KinectCam: use a Kinect v2 (Xbox One) as a webcam on Windows."""
+"""KinectCam: a Kinect v2 (Xbox One) as a webcam and 3D scanner on Windows."""
 
-__version__ = "1.1.0"
+__version__ = "1.2.0"

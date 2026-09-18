@@ -9,5 +9,6 @@ build/
 dist/
 *.spec
 
-# Logs and local scratch
+# Logs, scans and local scratch
 *.log
+*.stl

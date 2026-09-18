@@ -44,6 +44,11 @@ class _Sensor:
 # ICoordinateMapper::MapColorFrameToDepthSpace
 _MAP_COLOR_FRAME_TO_DEPTH_SPACE = 16
 
+# ICoordinateMapper::MapDepthFrameToCameraSpace. A CameraSpacePoint is three
+# floats in metres, so the runtime does the unprojection with the sensor's
+# factory calibration and nothing here has to model the optics.
+_MAP_DEPTH_FRAME_TO_CAMERA_SPACE = 14
+
 
 class _Desc:
     WIDTH = 3
@@ -282,13 +287,16 @@ class CoordinateMapper:
     runtime knows the sensor's factory calibration and does the conversion.
     """
 
-    def __init__(self, com, color_width: int, color_height: int):
+    def __init__(self, com, color_width: int = 1920, color_height: int = 1080):
         self._com = com
-        # A DepthSpacePoint is a pair of floats, so the array can be handed
-        # over directly as a float buffer.
-        self.points = np.zeros((color_height, color_width, 2), dtype=np.float32)
-        self._points_ptr = self.points.ctypes.data_as(POINTER(c_float))
+        self._color_size = (color_height, color_width)
         self._color_count = color_width * color_height
+        # Both output buffers are allocated on first use. The colour grid
+        # alone is eight megabytes, and scanning never asks for it.
+        self.points = None
+        self._points_ptr = None
+        self._camera_points = None
+        self._camera_ptr = None
 
     def map_color_to_depth(self, depth_stream) -> np.ndarray:
         """Where each colour pixel falls in the depth image.
@@ -296,6 +304,10 @@ class CoordinateMapper:
         Returns an (H, W, 2) array of depth-space coordinates. Pixels the
         sensor cannot map are -infinity.
         """
+        if self.points is None:
+            self.points = np.zeros((*self._color_size, 2), dtype=np.float32)
+            self._points_ptr = self.points.ctypes.data_as(POINTER(c_float))
+
         self._com.call(
             _MAP_COLOR_FRAME_TO_DEPTH_SPACE,
             [c_uint, POINTER(c_ushort), c_uint, POINTER(c_float)],
@@ -304,6 +316,28 @@ class CoordinateMapper:
             what="MapColorFrameToDepthSpace",
         )
         return self.points
+
+    def map_depth_to_camera(self, depth_stream) -> np.ndarray:
+        """Every depth pixel as a 3D point in metres.
+
+        Returns an (H, W, 3) array in the sensor's camera space: x to the
+        right, y up, z away from the lens. Pixels with no depth reading come
+        back as -infinity.
+        """
+        if self._camera_points is None:
+            height, width = depth_stream.buffer.shape
+            self._camera_points = np.zeros((height, width, 3), dtype=np.float32)
+            self._camera_ptr = self._camera_points.ctypes.data_as(POINTER(c_float))
+
+        self._com.call(
+            _MAP_DEPTH_FRAME_TO_CAMERA_SPACE,
+            [c_uint, POINTER(c_ushort), c_uint, POINTER(c_float)],
+            depth_stream.buffer.size, depth_stream.data_pointer,
+            self._camera_points.shape[0] * self._camera_points.shape[1],
+            self._camera_ptr,
+            what="MapDepthFrameToCameraSpace",
+        )
+        return self._camera_points
 
     def close(self):
         if self._com:

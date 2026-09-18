@@ -24,6 +24,7 @@ removes your background using depth instead of a green screen.
 | **Colour, background removed** | Same image, but the background is cut out using the depth sensor. No green screen. |
 | **Night vision (infrared)** | The 512x424 infrared camera. The Kinect lights the scene with its own emitter, so it **sees with the lights off**. Exposure adapts to the scene automatically. |
 | **Depth** | The raw 512x424 depth map, colour-coded from near (purple/blue) to far (yellow/red). |
+| **3D scan** | Captures the subject and writes a watertight STL, ready to slice and print. |
 
 Plus: selectable output resolution, mirror, 180-degree rotation for an
 upside-down sensor, a live preview, and three built-in diagnostic tools for
@@ -160,6 +161,35 @@ sensor sources have to be opened.
 The two cameras are physically separate and have different fields of view, so
 depth covers about **72% of the colour frame**: at the extreme edges there is no
 distance data and those pixels become background. Stay reasonably centred.
+
+### Scanning to a 3D-printable model
+
+**Scan to 3D model (STL)** captures a burst of depth frames and writes a mesh
+a slicer will accept.
+
+What you get is a **relief, not a bust**. The Kinect is a time-of-flight
+camera, not a scanner that orbits its subject: it sees one side of what is in
+front of it, so a capture is a height field. Your face, not your head. The
+surface is given a flat back and a rim joining the two, which turns an open
+shell into a watertight solid, and that prints well as a plaque.
+
+How to get a good one:
+
+- Sit **about 70 cm** from the sensor and hold still for a couple of seconds.
+- Drag the **distance slider** down to just past yourself. It doubles as the
+  scan's far limit, and leaving it at two metres captures the room as well.
+- Even, indirect light. The depth camera does not care about light, but it
+  does struggle with anything glossy, very dark, or hairy, which come out as
+  holes. The holes are stitched shut rather than left open.
+
+The model is written at **life size in millimetres**, so a face comes out
+around 200 mm tall. Scale it in your slicer to whatever you actually want to
+print.
+
+Thirty frames are combined with a median rather than an average, which
+removes the sensor's speckle and discards the occasional wild reading instead
+of averaging it in. Neighbouring pixels more than 2 cm apart in depth are not
+joined, so the subject does not end up webbed to the wall behind it.
 
 ### The microphones: nothing to do
 
@@ -330,8 +360,10 @@ kinectcam/
   engine.py          capture thread and publishing to the virtual camera
   diagnostics.py     environment checks
   stability.py       dropped-frame and freeze analysis
+  scanning.py        depth frames to a watertight STL
   app.py             tkinter interface
 tests/test_offline.py  tests that do not need the sensor
+tests/test_scanning.py the scanning geometry, watertightness above all
 ```
 
 The native module **does not use comtypes**: it calls COM vtable slots
@@ -380,6 +412,10 @@ Python 3.10+, plus `numpy`, `pillow` and `pyvirtualcam` (see
   out of reach are the Kinect API's advanced audio features, such as knowing
   **which direction a voice is coming from**: using those would also require a
   virtual microphone driver.
+- **Scans are one-sided.** A time-of-flight camera sees the surface facing
+  it, so there is no way to get the back of a head from one position. A closed
+  model would mean capturing from several angles and registering them
+  together, which is a different project.
 - **No skeleton tracking.** The Kinect can track 25 joints per person
   (`IBodyFrameSource`). Only the body index is used here, i.e. which pixels
   belong to whom, not where the hands or the head are.
