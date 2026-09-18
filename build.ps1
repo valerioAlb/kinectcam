@@ -36,6 +36,7 @@ Invoke-Native $python @("-m", "pip", "install", "--quiet", "-r", "requirements.t
 Write-Host "Running the test suite..." -ForegroundColor Cyan
 Invoke-Native $python @("tests\test_offline.py") "Test suite"
 Invoke-Native $python @("tests\test_scanning.py") "Scanning test suite"
+Invoke-Native $python @("tests\test_gui.py") "Window test suite"
 
 Write-Host "Building the executable..." -ForegroundColor Cyan
 Invoke-Native $python @(

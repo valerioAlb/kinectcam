@@ -34,3 +34,4 @@ jobs:
         run: |
           python tests/test_offline.py
           python tests/test_scanning.py
+          python tests/test_gui.py

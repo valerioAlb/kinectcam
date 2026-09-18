@@ -77,6 +77,10 @@ class KinectCamApp:
             on_stopped=self._post_stopped,
         )
         self._preview_image = None  # tkinter keeps no reference of its own
+        # What the controls are drawn against. The engine's own thread stays
+        # alive for a moment after it reports it has stopped, so asking it
+        # would answer for the past.
+        self._live = False
 
         root.title("KinectCam - Kinect v2 as a webcam")
         root.resizable(False, False)
@@ -243,7 +247,7 @@ class KinectCamApp:
         Distance is also disabled when cutting by silhouette, where it is not
         what decides: it stays only as the fallback when nobody is detected.
         """
-        running = self.engine.running
+        running = self._live
         active = self._selected_mode == Mode.COLOR_NO_BACKGROUND
         by_distance = self.matte_var.get() == MatteSource.DISTANCE
 
@@ -268,13 +272,13 @@ class KinectCamApp:
         # With the preview live the button takes the shot on screen, which is
         # a different enough act to deserve a different label.
         self.scan_button.configure(
-            text="Capture this view to STL" if previewing and self.engine.running
+            text="Capture this view to STL" if previewing and running
             else "Scan to 3D model (STL)"
         )
         # A full turn has to be captured from a running preview: it needs the
         # sensor open for half a minute while the subject moves.
         self.turntable_button.configure(
-            state="normal" if previewing and self.engine.running else "disabled"
+            state="normal" if previewing and running else "disabled"
         )
 
     def _on_mode_changed(self, _event=None):
@@ -335,11 +339,15 @@ class KinectCamApp:
             far_mm=int(self.distance_var.get() * 1000),
             view_angle=self.view_var.get(),
         )
-        self._set_controls_enabled(False)
         self.toggle_button.configure(text="Stop virtual camera")
         self.engine.start(settings)
+        self._live = True
+        # Syncing before the engine has started reads it as stopped, which
+        # leaves the 360 button greyed out for the whole session.
+        self._set_controls_enabled(False)
 
     def _on_engine_stopped(self):
+        self._live = False
         self._set_controls_enabled(True)
         self.toggle_button.configure(text="Start virtual camera", state="normal")
         self._blank_preview()
