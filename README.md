@@ -191,12 +191,23 @@ A different symptom from dropped frames, and a different cause: the image
 freezes for a few seconds, then resumes, and it keeps happening. Work through
 this in order.
 
-**1. Check your USB controller.** Run **Diagnostics** and read the "USB 3.0
+**1. Turn off audio enhancements on the Kinect's microphone.** This is the
+most common cause and the least intuitive one, because it has nothing to do
+with video. With Windows audio enhancements enabled on the Kinect's microphone
+array, the SDK restarts the sensor in a loop: it streams for a few seconds,
+drops, is re-detected, and starts over. Muting that microphone does the same.
+
+Settings → System → Sound → **More sound settings** → *Recording* tab →
+right-click **Microphone Array - Xbox NUI Sensor** → Properties → *Advanced*
+→ untick **Enable audio enhancements**. Check it is not muted while you are
+there. KinectCam's diagnostics flag this directly.
+
+**2. Check your USB controller.** Run **Diagnostics** and read the "USB 3.0
 controller" line. If it says `(unsupported)`, that is very likely your answer:
 see [The USB controller matters](#the-usb-controller-matters-more-than-you-would-expect).
 No amount of cable swapping fixes an unsupported chipset.
 
-**2. Plug the laptop into mains power.** Cheap to rule out, and the most common
+**3. Plug the laptop into mains power.** Cheap to rule out, and the most common
 cause on laptops. On battery Windows enables **USB selective suspend**, and the
 Kinect v2 is precisely the peripheral that cannot cope:
 it streams isochronously at full bandwidth and draws a lot of current. The port
@@ -209,7 +220,7 @@ To disable it on battery too, from an elevated PowerShell:
 powercfg /setdcvalueindex SCHEME_CURRENT 2a737441-1930-4402-8d77-b2bebba308a3 48e6b7a6-50f5-4782-a5d4-53bb8f07e226 0; powercfg /setactive SCHEME_CURRENT
 ```
 
-**3. Press "Hunt for freezes".** It watches the stream for ninety seconds and
+**4. Press "Hunt for freezes".** It watches the stream for ninety seconds and
 logs every episode: when it happens and how long it lasts. What matters is the
 **regularity**:
 
@@ -219,7 +230,7 @@ logs every episode: when it happens and how long it lasts. What matters is the
 | Scattered, irregular freezes | **Marginal contact or power**: USB port, cable, adapter power supply. |
 | No freezes while idle | Try again with the virtual camera running: the higher load may be what triggers it. |
 
-**4. Change USB 3.0 port**, choosing a direct one on a different controller,
+**5. Change USB 3.0 port**, choosing a direct one on a different controller,
 and check that the adapter's power supply is firmly seated.
 
 A note on "it works fine on the Xbox": useful information, but read it
@@ -296,6 +307,7 @@ degrades together.
 | "opened but no data arriving" | Shared or hubbed USB 3.0 port: try a different direct port |
 | "Virtual camera unavailable" | Open OBS Studio once and close it: the first launch registers the driver |
 | "Kinect20.dll not found" | Runtime not installed: rerun `install.ps1` |
+| The camera streams a few seconds, drops, repeats | Audio enhancements on the Kinect microphone. See [If the camera freezes](#if-the-camera-freezes-and-restarts-periodically) |
 | "USB 3.0 controller: AMD (unsupported)" | Microsoft only supports Intel and Renesas controllers. A Renesas uPD720202 PCIe card is the usual fix. |
 | "No frames from the sensor for several seconds" | The sensor stopped streaming and the image is frozen on the last frame. Almost always the USB 3.0 cable or the adapter's power supply. Stop and restart the virtual camera. |
 | The camera freezes and restarts every few seconds | See [If the camera freezes and restarts periodically](#if-the-camera-freezes-and-restarts-periodically) |

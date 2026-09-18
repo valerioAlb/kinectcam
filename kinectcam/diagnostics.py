@@ -311,6 +311,75 @@ def check_microphone() -> Check:
     )
 
 
+# Where Windows keeps the properties of every audio endpoint.
+_CAPTURE_ENDPOINTS = r"SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio\Capture"
+
+# Property keys inside an endpoint's store, named by GUID and index.
+_PKEY_FRIENDLY_NAME = "{b3f8fa53-0004-438e-9003-51a46e139bfc},6"
+# PKEY_AudioEndpoint_Disable_SysFx: 1 means the enhancements are switched off.
+_PKEY_DISABLE_SYSFX = "{1da5d803-d492-4edd-8c23-e0c0ffee7f0e},5"
+
+
+def kinect_audio_enhancements_enabled():
+    """True when Windows audio enhancements are active on the Kinect's mic array.
+
+    This is worth checking despite having nothing to do with video. With
+    enhancements on, the Kinect SDK restarts the sensor in a loop: it streams
+    for a few seconds, drops, is re-detected, and starts over. Muting the same
+    microphone does the same thing. The cause is documented and the fix takes
+    a moment, but nothing about the symptom points at audio, so people chase
+    power supplies and USB cables instead.
+
+    Returns None when no Kinect capture endpoint can be found.
+    """
+    try:
+        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, _CAPTURE_ENDPOINTS) as root:
+            index = 0
+            while True:
+                try:
+                    endpoint = winreg.EnumKey(root, index)
+                except OSError:
+                    return None
+                index += 1
+                try:
+                    with winreg.OpenKey(root, endpoint + r"\Properties") as props:
+                        name, _ = winreg.QueryValueEx(props, _PKEY_FRIENDLY_NAME)
+                        if not re.search(r"NUI|Kinect", str(name), re.IGNORECASE):
+                            continue
+                        try:
+                            disabled, _ = winreg.QueryValueEx(props, _PKEY_DISABLE_SYSFX)
+                        except OSError:
+                            # Never set means Windows is applying its defaults.
+                            return True
+                        return int(disabled) != 1
+                except OSError:
+                    continue
+    except OSError:
+        return None
+
+
+def check_audio_enhancements() -> Check:
+    enabled = kinect_audio_enhancements_enabled()
+    if enabled is None:
+        return Check(
+            "Kinect microphone enhancements", True,
+            "no Kinect audio endpoint found, nothing to check",
+        )
+    return Check(
+        "Kinect microphone enhancements",
+        not enabled,
+        "enabled" if enabled else "disabled, as they should be",
+        "" if not enabled else (
+            "Turn them off: with enhancements on, the SDK restarts the sensor "
+            "every few seconds in a loop. Settings > System > Sound > More "
+            "sound settings > Recording, right-click Microphone Array - Xbox "
+            "NUI Sensor, Properties > Advanced, and untick Enable audio "
+            "enhancements. While you are there, make sure that microphone is "
+            "not muted either, which causes the same loop."
+        ),
+    )
+
+
 def check_virtual_camera() -> Check:
     obs_installed = os.path.isdir(r"C:\Program Files\obs-studio")
     filter_registered = _registry_key_exists(
@@ -364,6 +433,7 @@ def run_checks(include_sensor: bool = True) -> list[Check]:
         check_power(),
         check_device_present(),
         check_microphone(),
+        check_audio_enhancements(),
         check_virtual_camera(),
     ]
     if include_sensor:

@@ -343,6 +343,10 @@ class MonitorReport:
     # or the service rather than anywhere along the data path.
     idle_watched: bool = False
     idle_dropouts: int = 0
+    # Windows audio enhancements on the Kinect's microphone array make the
+    # SDK restart the sensor in a loop. Nothing about the symptom points at
+    # audio, so it has to be surfaced or it never gets found.
+    audio_enhancements_on: bool = False
 
     @property
     def fps(self) -> float:
@@ -470,6 +474,9 @@ def monitor(duration: float = MONITOR_DURATION, stall_seconds: float = STALL_SEC
     report = MonitorReport()
     report.on_battery = diagnostics.on_ac_power() is False
     report.unsupported_controller = diagnostics.has_supported_usb_controller() is False
+    report.audio_enhancements_on = (
+        diagnostics.kinect_audio_enhancements_enabled() is True
+    )
 
     sensor = KinectSensor()
     try:
@@ -668,11 +675,8 @@ def interpret_monitor(report: MonitorReport) -> list:
                     "IT CYCLES WITH NOTHING BEING TRANSFERRED. No data was "
                     "being carried, so nothing along the data path can explain "
                     "it: the device and the Kinect service are losing each "
-                    "other on their own. Restart the KinectMonitor service "
-                    "first. If the sensor behaves on an Xbox, that points at "
-                    "the Windows runtime rather than the hardware, and the "
-                    "runtime is known to be troublesome on recent Windows 11 "
-                    "builds."
+                    "other on their own. Restarting the KinectMonitor service "
+                    "is the cheapest thing to try next."
                 )
             else:
                 lines.append(
@@ -725,6 +729,19 @@ def interpret_monitor(report: MonitorReport) -> list:
             "through the gap, so the frames never reached this machine. That "
             "points at the link: bandwidth, the host controller, or power "
             "management on the port."
+        )
+
+    if report.audio_enhancements_on:
+        lines.append("")
+        lines.append(
+            "START HERE: Windows audio enhancements are enabled on the "
+            "Kinect's microphone array, and that alone makes the SDK restart "
+            "the sensor in a loop exactly like this one. It has nothing to do "
+            "with video, which is why nobody finds it. Settings > System > "
+            "Sound > More sound settings > Recording, right-click Microphone "
+            "Array - Xbox NUI Sensor, Properties > Advanced, untick Enable "
+            "audio enhancements. Check it is not muted while you are there. "
+            "Then run this test again."
         )
 
     # These only matter when the device did not simply drop off the bus,

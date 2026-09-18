@@ -822,6 +822,49 @@ class PowerCheckTests(unittest.TestCase):
             self.assertTrue(check.hint)
 
 
+class AudioEnhancementTests(unittest.TestCase):
+    """The cause nobody looks for, because the symptom is entirely visual."""
+
+    def test_query_returns_a_boolean_or_none(self):
+        self.assertIn(diagnostics.kinect_audio_enhancements_enabled(), (True, False, None))
+
+    def test_check_explains_the_fix_when_they_are_on(self):
+        check = diagnostics.check_audio_enhancements()
+        self.assertEqual(check.name, "Kinect microphone enhancements")
+        self.assertTrue(check.detail)
+        if not check.ok:
+            self.assertIn("audio enhancements", check.hint)
+            self.assertIn("muted", check.hint)
+
+    def test_a_missing_endpoint_is_not_reported_as_a_fault(self):
+        # With no Kinect plugged in there is no endpoint to inspect, and that
+        # is not evidence of anything.
+        if diagnostics.kinect_audio_enhancements_enabled() is None:
+            self.assertTrue(diagnostics.check_audio_enhancements().ok)
+
+    def test_the_monitor_puts_the_audio_finding_first(self):
+        report = stability.MonitorReport(duration=90.0, frames=900, started=True)
+        report.events = [
+            stability.FreezeEvent(at=at, duration=6.0, sensor_offline=True)
+            for at in (10, 20, 30, 40)
+        ]
+        report.windows_usb_events = 0
+        report.audio_enhancements_on = True
+        verdict = " ".join(stability.interpret_monitor(report))
+        self.assertIn("START HERE", verdict)
+        self.assertIn("restart the sensor in a loop", verdict)
+
+    def test_no_audio_finding_means_no_audio_advice(self):
+        report = stability.MonitorReport(duration=90.0, frames=900, started=True)
+        report.events = [
+            stability.FreezeEvent(at=at, duration=6.0, sensor_offline=True)
+            for at in (10, 20, 30, 40)
+        ]
+        report.windows_usb_events = 0
+        verdict = " ".join(stability.interpret_monitor(report))
+        self.assertNotIn("START HERE", verdict)
+
+
 class UsbControllerTests(unittest.TestCase):
     """The Kinect v2 only works properly on Intel or Renesas controllers."""
 
