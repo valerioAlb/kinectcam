@@ -586,29 +586,63 @@ class FreezeMonitorTests(unittest.TestCase):
     def test_a_device_that_drops_off_is_blamed_on_power(self):
         # The runtime losing sight of the sensor means it left the bus. No
         # amount of software can cause that, so the verdict must say hardware.
-        verdict = " ".join(stability.interpret_monitor(self._offline_report()))
-        self.assertIn("LEFT THE BUS", verdict)
+        report = self._offline_report()
+        report.windows_usb_events = 12
+        verdict = " ".join(stability.interpret_monitor(report))
+        self.assertIn("lost the device entirely", verdict)
         self.assertIn("12 V", verdict)
 
     def test_the_wrong_power_brick_is_called_out_by_its_rating(self):
         # The Kinect v1 supply looks nearly identical and gives under half the
         # current, which is a mistake worth naming rather than hinting at.
-        verdict = " ".join(stability.interpret_monitor(self._offline_report()))
+        report = self._offline_report()
+        report.windows_usb_events = 12
+        verdict = " ".join(stability.interpret_monitor(report))
         self.assertIn("1.08 A", verdict)
         self.assertIn("v1", verdict)
 
     def test_a_correct_label_does_not_end_the_investigation(self):
         # A genuine, correctly rated supply can still sag after a decade, so
         # the advice has to continue past the label rather than stop there.
-        verdict = " ".join(stability.interpret_monitor(self._offline_report()))
+        report = self._offline_report()
+        report.windows_usb_events = 12
+        verdict = " ".join(stability.interpret_monitor(report))
         self.assertIn("correct label does not clear it", verdict)
-        self.assertIn("swap", verdict)
+        self.assertIn("arriving at the sensor", verdict)
 
     def test_working_on_an_xbox_is_not_treated_as_exoneration(self):
         # The console powers the sensor itself, so it never exercises the
         # adapter or its brick.
-        verdict = " ".join(stability.interpret_monitor(self._offline_report()))
-        self.assertIn("Xbox never uses", verdict)
+        report = self._offline_report()
+        report.windows_usb_events = 12
+        verdict = " ".join(stability.interpret_monitor(report))
+        self.assertIn("never uses", verdict)
+
+    def test_windows_logging_the_dropouts_confirms_an_electrical_fault(self):
+        report = self._offline_report()
+        report.windows_usb_events = 9
+        verdict = " ".join(stability.interpret_monitor(report))
+        self.assertIn("re-enumerating", verdict)
+        self.assertIn("electrical", verdict)
+
+    def test_windows_silence_moves_the_blame_off_power(self):
+        # A device that truly leaves the bus makes Windows notice. If nothing
+        # was logged, only the runtime lost it, and telling the user to chase
+        # the power supply would send them the wrong way entirely.
+        report = self._offline_report()
+        report.windows_usb_events = 0
+        verdict = " ".join(stability.interpret_monitor(report))
+        self.assertIn("NO USB or PnP events", verdict)
+        self.assertIn("KinectMonitor", verdict)
+        self.assertNotIn("POWER IS THE FIRST THING", verdict)
+
+    def test_an_unread_event_log_keeps_the_power_advice(self):
+        # Unknown is not the same as zero: without the log, power stays the
+        # first thing to rule out.
+        report = self._offline_report()
+        report.windows_usb_events = -1
+        verdict = " ".join(stability.interpret_monitor(report))
+        self.assertIn("POWER IS THE FIRST THING", verdict)
 
     def test_dropping_off_suppresses_the_other_explanations(self):
         # Two contradictory causes on screen at once would be worse than one.
@@ -616,7 +650,7 @@ class FreezeMonitorTests(unittest.TestCase):
         report.unsupported_controller = True
         report.on_battery = True
         verdict = " ".join(stability.interpret_monitor(report))
-        self.assertIn("LEFT THE BUS", verdict)
+        self.assertIn("lost the device entirely", verdict)
         self.assertNotIn("LIKELY CAUSE", verdict)
         self.assertNotIn("ON BATTERY", verdict)
 
@@ -627,7 +661,7 @@ class FreezeMonitorTests(unittest.TestCase):
         for event in report.events:
             event.clock_advanced_ms = 2000.0
         verdict = " ".join(stability.interpret_monitor(report))
-        self.assertNotIn("LEFT THE BUS", verdict)
+        self.assertNotIn("lost the device entirely", verdict)
 
     def test_a_present_device_with_a_stopped_clock_points_at_the_sensor(self):
         report = self._report([10, 20, 30, 40], length=2.0)

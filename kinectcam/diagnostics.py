@@ -250,6 +250,28 @@ def check_power() -> Check:
     return Check("Power source", not hints, detail, " ".join(hints))
 
 
+def recent_usb_events(minutes: float = 5.0) -> int:
+    """How many USB or PnP events Windows logged in the last few minutes.
+
+    Independent corroboration for a device that appears to leave the bus. If
+    the sensor is really being reset, Windows notices the device going away
+    and coming back and records it, whatever our own runtime thinks.
+    Returns -1 when the log cannot be read.
+    """
+    output = _run_powershell(
+        f"$since = (Get-Date).AddMinutes(-{minutes:.0f}); "
+        "@(Get-WinEvent -FilterHashtable @{LogName='System'; StartTime=$since} "
+        "-ErrorAction SilentlyContinue | Where-Object { "
+        "$_.ProviderName -match 'USB|Kernel-PnP|DriverFrameworks' -and "
+        "$_.Message -match 'USB|Kinect|NUI' }).Count",
+        timeout=40.0,
+    )
+    try:
+        return int(output.strip().splitlines()[-1])
+    except (ValueError, IndexError):
+        return -1
+
+
 def has_supported_usb_controller():
     """True when at least one Intel or Renesas controller is present.
 

@@ -328,6 +328,8 @@ class MonitorReport:
     started: bool = False
     on_battery: bool = False
     unsupported_controller: bool = False
+    # USB/PnP events Windows logged while watching. -1 means unread.
+    windows_usb_events: int = -1
 
     @property
     def fps(self) -> float:
@@ -450,6 +452,13 @@ def monitor(duration: float = MONITOR_DURATION, stall_seconds: float = STALL_SEC
         report.duration = time.perf_counter() - start
     finally:
         sensor.close()
+
+    if report.events:
+        if progress:
+            progress("Checking what Windows logged while watching...")
+        report.windows_usb_events = diagnostics.recent_usb_events(
+            minutes=max(2.0, report.duration / 60.0 + 1.0)
+        )
     return report
 
 
@@ -495,37 +504,58 @@ def interpret_monitor(report: MonitorReport) -> list:
     # survived, rather than our own reader having stalled.
     if offline > total / 2:
         lines.append(
-            "VERDICT: the device LEFT THE BUS and came back, every time. No "
-            "software can make a device disappear from USB, so this is "
-            "hardware: power or connection. The regularity fits a brown-out "
-            "reset loop, where the sensor draws more than it is being given, "
-            "resets, comes back and does it again."
+            "VERDICT: the runtime lost the device entirely, every time. The "
+            "regularity fits a reset loop: it comes up, runs for a few "
+            "seconds, drops, and does it again."
         )
         lines.append("")
-        lines.append(
-            "START WITH THE POWER SUPPLY. The Kinect v2 needs 12 V at 2.67 A "
-            "(32 W). Read the label on the brick: 12 V 1.08 A is the Xbox 360 "
-            "Kinect v1 supply, which looks almost identical and delivers under "
-            "half the current, and third-party adapters are often underrated."
-        )
+
+        # Windows notices a device that really leaves the bus. Its silence
+        # says the reset happened above the USB layer, which points somewhere
+        # completely different from a power fault.
+        logged = report.windows_usb_events
+        if logged > 0:
+            lines.append(
+                f"Windows logged {logged} USB or PnP events while watching, so "
+                "the device really is re-enumerating at the operating system "
+                "level. That is electrical: power delivery, the adapter, or a "
+                "connection."
+            )
+        elif logged == 0:
+            lines.append(
+                "Windows logged NO USB or PnP events while watching, which "
+                "matters. A device that truly leaves the bus makes Windows "
+                "notice; here only the Kinect runtime lost it. Look at the "
+                "sensor and its service rather than at power: try restarting "
+                "the KinectMonitor service, and check that the sensor's fan "
+                "is spinning, because the Kinect shuts its emitter down when "
+                "it overheats."
+            )
         lines.append("")
-        lines.append(
-            "A correct label does not clear it. These are switching supplies "
-            "from 2014 to 2017, and an aged one still prints its original "
-            "rating while sagging under load. Two checks that cost nothing: "
-            "run this test again with an ear next to the brick and the sensor, "
-            "because a supply oscillating like this often ticks audibly and "
-            "the sensor's fan rises and falls in step; and if you have a "
-            "multimeter, measure the 12 V output while the sensor is "
-            "streaming. Otherwise the answer is a swap: another adapter, or "
-            "another 12 V supply rated at 2.67 A or more."
-        )
-        lines.append("")
-        lines.append(
-            "If the sensor behaves on an Xbox, that does not clear the supply "
-            "either. An Xbox powers the sensor from the console, so the "
-            "adapter and its brick are exactly the parts the Xbox never uses."
-        )
+        if logged != 0:
+            lines.append(
+                "POWER IS THE FIRST THING TO RULE OUT. The Kinect v2 needs 12 V "
+                "at 2.67 A (32 W). Read the label on the brick: 12 V 1.08 A is "
+                "the Xbox 360 Kinect v1 supply, which looks almost identical "
+                "and delivers under half the current, and third-party adapters "
+                "are often underrated."
+            )
+            lines.append("")
+            lines.append(
+                "A correct label does not clear it, and neither does a good "
+                "reading at the brick. Measure while the sensor is streaming, "
+                "and remember the voltage that matters is the one arriving at "
+                "the sensor: a worn connector drops over a volt at nearly 3 A "
+                "while the supply itself still reads 12. If a 6 second freeze "
+                "shows no dip at all, the supply is holding and the fault is "
+                "further along: the adapter, its connector, or the cable."
+            )
+            lines.append("")
+            lines.append(
+                "If the sensor behaves on an Xbox, that does not clear any of "
+                "this. An Xbox powers the sensor from the console, so the "
+                "adapter and its brick are exactly the parts it never uses."
+            )
     elif not report.is_periodic:
         lines.append(
             "VERDICT: the freezes are IRREGULAR and the device stayed present. "
